@@ -1,6 +1,6 @@
 # DevFlow — local development workspace manager
 
-Windows-first Rust + Tauri 2 + React MVP. **Source-code prototype, not a verified production build.**
+Windows-first Rust + Tauri 2 + React MVP. **Development build verified on Windows; production packaging and service lifecycle remain unverified.**
 
 ## Included
 - Import a local project root through native folder picker.
@@ -38,4 +38,4 @@ npm run tauri build
 - Starting from a missing or incorrectly configured environment will fail and show an error.
 - Existing projects may use different working directories or entrypoints; edit manually.
 - Do not expose this app to untrusted repositories or run unreviewed commands.
-- This source has **not been compiled/tested in this environment**; expect integration fixes before release.
+- `npm run build` and `cargo check` have passed on Windows. Desktop visual review and end-to-end service lifecycle checks are still required before release.

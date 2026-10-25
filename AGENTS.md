@@ -8,6 +8,9 @@ Import project root -> detect services -> user reviews commands -> one-click run
 ## Stack
 Rust + Tokio + Tauri 2 for desktop process management; React + TypeScript + Vite for UI. Local JSON config initially. No hosted backend.
 
+## Interface design system
+Use `docs/DESIGN_SYSTEM.md` for theme tokens, typography, components, accessibility, and responsive behavior. Keep project control and logs prominent without changing typed Tauri IPC contracts for visual work.
+
 ## Rules for modifications
 1. Inspect existing files and git status before editing. Preserve user changes.
 2. Plan changes briefly, then implement small focused patches. Do not rewrite unrelated files.

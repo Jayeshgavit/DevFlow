@@ -12,3 +12,4 @@
 10. **Do not promise zero-config support for arbitrary repositories.** Always provide manual override.
 11. **No destructive operations without confirmation.** Clearly label forced process termination.
 12. **Keep completed work intact.** No unnecessary rewrites or unsafe shortcuts.
+13. **Follow the interface design system.** See `docs/DESIGN_SYSTEM.md` for both themes, shared components, accessibility, and responsive rules.

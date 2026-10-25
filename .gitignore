@@ -8,6 +8,7 @@ pnpm-debug.log*
 
 # Rust and Tauri build output
 src-tauri/target/
+src-tauri/gen/
 *.dSYM/
 
 # Local environment and secrets
