@@ -1,5 +1,22 @@
 use std::path::{Path, PathBuf};
 
+pub(crate) fn declared_port(args: &[String]) -> Result<Option<u16>, String> {
+    let mut port = None;
+    let mut index = 0;
+    while index < args.len() {
+        let value = if args[index] == "--port" {
+            index += 1;
+            Some(args.get(index).ok_or("--port needs a number from 1 to 65535.")?.as_str())
+        } else { args[index].strip_prefix("--port=") };
+        if let Some(value) = value {
+            let parsed = value.parse::<u16>().ok().filter(|value| *value > 0).ok_or("--port needs a number from 1 to 65535.")?;
+            if port.replace(parsed).is_some() { return Err("Configure only one --port value for a service.".into()); }
+        }
+        index += 1;
+    }
+    Ok(port)
+}
+
 pub(crate) fn resolve_program(program: &str, cwd: &Path) -> Result<PathBuf, String> {
     let program = program.trim();
     if program.is_empty() { return Err("Enter an executable before starting this service.".into()); }
@@ -57,6 +74,19 @@ pub(crate) fn script_kind(path: &Path) -> Result<&'static str, String> {
     }
 }
 
+#[cfg(windows)]
+pub(crate) fn batch_command_line(path: &Path, args: &[String]) -> Result<String, String> {
+    let executable = path.to_string_lossy();
+    let unsafe_shell_characters = ['%', '!', '^', '&', '|', '<', '>', '"', '\r', '\n'];
+    if executable.chars().any(|character| unsafe_shell_characters.contains(&character))
+        || args.iter().any(|argument| argument.chars().any(|character| unsafe_shell_characters.contains(&character)))
+    {
+        return Err("Batch launch paths and arguments cannot contain cmd.exe expansion or control characters. Use the runtime executable directly or simplify this command.".into());
+    }
+    let quote = |value: &str| if value.chars().any(char::is_whitespace) { format!("\"{value}\"") } else { value.to_string() };
+    Ok(std::iter::once(quote(&executable)).chain(args.iter().map(|argument| quote(argument))).collect::<Vec<_>>().join(" "))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -65,6 +95,14 @@ mod tests {
     fn missing_program_is_actionable() {
         let error = resolve_program("devflow-command-that-does-not-exist", Path::new(".")).unwrap_err();
         assert!(error.contains("PATH"));
+    }
+
+    #[test]
+    fn parses_only_explicit_ports() {
+        assert_eq!(declared_port(&["run".into(), "dev".into(), "--port=3000".into()]).unwrap(), Some(3000));
+        assert_eq!(declared_port(&["--port".into(), "8000".into()]).unwrap(), Some(8000));
+        assert_eq!(declared_port(&["-p".into(), "package".into()]).unwrap(), None);
+        assert!(declared_port(&["--port".into()]).is_err());
     }
 
     #[cfg(windows)]

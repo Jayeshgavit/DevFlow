@@ -1,0 +1,120 @@
+/* Hallmark · pre-emit critique: P4 H5 E4 S5 R5 V4
+ * Logs workbench · existing DevFlow light/dark tokens · output-first composition. */
+.logs-workspace[hidden] { display:none; }
+.console-page-header { display:flex; align-items:center; flex-wrap:wrap; gap:8px; margin-bottom:12px; min-width:0; }
+.console-page-header h1 { display:flex; align-items:center; gap:8px; margin:0 8px 0 0; font:600 20px var(--font-heading); letter-spacing:-.5px; }
+.console-page-header h1 svg { color:var(--text-faint); }
+.console-project-picker { margin-right:auto; max-width:min(100%,300px); min-width:0; }
+.console-project-picker select,.console-service select { width:100%; max-width:100%; min-width:0; border:1px solid var(--border-soft); border-radius:var(--radius-sm); background:var(--surface-input); color:var(--text); padding:7px 9px; font:500 12px var(--font-ui); }
+.console-page-header .button { min-height:32px; padding:6px 8px; font-size:11px; }
+.developer-console { display:flex; flex-direction:column; min-width:0; box-shadow:none; border-radius:var(--radius-md); }
+[data-theme=light] .developer-console { box-shadow:none; border-color:var(--border-soft); }
+.console-toolbar { display:flex; align-items:center; flex-wrap:wrap; gap:4px; padding:8px; border-bottom:1px solid var(--border-soft); background:var(--surface-raised); }
+.console-toolbar .button { min-height:32px; padding:6px 8px; font-size:11px; border-radius:var(--radius-sm); }
+.console-toolbar .button:hover { transform:none; }
+.console-toolbar .button[aria-pressed=true] { color:var(--success); background:var(--success-bg); }
+.console-service { min-width:0; max-width:220px; }
+.console-search { flex:1; min-width:160px; padding-inline:8px; }
+.console-search input { min-width:0; padding:8px 0; font-size:12px; }
+.console-search kbd { white-space:nowrap; font:10px var(--font-mono); color:var(--text-faint); }
+.console-filterbar { display:flex; align-items:center; flex-wrap:wrap; justify-content:space-between; gap:4px; padding:5px 8px; border-bottom:1px solid var(--border-soft); }
+.developer-console .log-category-filters { display:flex; flex-wrap:wrap; gap:4px; padding:0; overflow:visible; }
+.developer-console .category-chip { gap:5px; padding:5px 7px; border-radius:var(--radius-sm); font-size:10px; }
+.developer-console .log-navigation { padding:0; border:0; }
+.developer-console .issue-navigation { gap:10px; }
+.developer-console .issue-navigation>span { gap:4px; }
+.developer-console .log-navigation button { min-height:24px; min-width:24px; }
+.developer-console .log-viewport-wrap { flex:1; min-height:0; }
+.developer-console .console-viewport { box-sizing:border-box; height:calc(100dvh - 250px); min-height:280px; max-height:none; padding:0; background:var(--log-bg); scrollbar-gutter:stable; overflow:auto; overflow-anchor:none; font:400 var(--console-font-size)/1.65 var(--font-mono); }
+.developer-console .log-row { display:grid; grid-template-columns:9ch minmax(9ch,14ch) 6ch minmax(0,1fr) 26px; gap:10px; align-items:start; border:0; border-left:2px solid transparent; border-radius:0; padding:5px 10px; min-height:32px; }
+.developer-console .log-row:hover { background:var(--surface-soft); }
+.developer-console .log-category-error { border-left-color:var(--danger); }
+.developer-console .log-category-warning { border-left-color:var(--log-warning); }
+.developer-console .log-category-success { border-left-color:var(--log-success); }
+.developer-console .log-row .log-message { font:inherit; color:var(--text); margin:0; }
+.developer-console .log-row .log-row-time,.developer-console .log-row .log-service,.developer-console .log-row .log-stream { font:inherit; font-size:max(10px,calc(var(--console-font-size) - 1px)); line-height:1.8; padding:0; }
+.developer-console .log-row-time { color:var(--text-faint); font-variant-numeric:tabular-nums; }
+.developer-console .log-service { color:var(--accent-strong); overflow-wrap:anywhere; }
+.developer-console .log-row .log-stream { color:var(--text-faint); }
+.developer-console .log-category-error .log-message { color:var(--danger); }
+.developer-console .log-category-warning .log-message { color:var(--log-warning); }
+.developer-console .log-category-success .log-message { color:var(--log-success); }
+.developer-console .log-row-content { min-width:0; }
+.developer-console .log-stack-details>summary { color:inherit; font:inherit; }
+.developer-console .log-stack-details pre { font:inherit; max-height:none; overflow:visible; padding:8px 0; }
+.developer-console .log-row.is-targeted { outline:1px solid var(--focus); outline-offset:-1px; }
+.developer-console .console-wrap .log-message,.developer-console .console-wrap .log-stack-details>summary { white-space:pre-wrap; overflow-wrap:anywhere; }
+.developer-console .console-nowrap .log-message,.developer-console .console-nowrap .log-stack-details>summary { white-space:pre; overflow-wrap:normal; }
+.developer-console .console-nowrap .log-row { min-width:100%; width:max-content; grid-template-columns:9ch 14ch 6ch minmax(40ch,1fr) 26px; }
+.developer-console .console-nowrap .log-row-content { min-width:40ch; }
+.developer-console .http-meta { margin-top:2px; font-size:max(10px,calc(var(--console-font-size) - 2px)); }
+.developer-console .log-copy-row { opacity:.4; }
+.developer-console .log-copy-row:hover,.developer-console .log-copy-row:focus-visible { opacity:1; }
+.developer-console .log-footer { padding:8px 10px; font-size:10px; }
+.developer-console .log-retention-note { padding:5px 10px; font-size:10px; }
+.developer-console .log-empty { min-height:100%; padding:24px; }
+.console-options { width:224px; max-width:calc(100vw - 40px); padding:8px; display:grid; gap:14px; }
+.console-options label { display:flex; flex-wrap:wrap; align-items:center; justify-content:space-between; gap:8px; color:var(--text); font:500 12px var(--font-ui); }
+.console-options input[type=range] { width:100%; accent-color:var(--accent-strong); }
+.console-options input[type=number],.console-options select { width:112px; min-width:0; border:1px solid var(--border-soft); border-radius:var(--radius-sm); padding:6px; background:var(--surface-input); color:var(--text); font:11px var(--font-mono); }
+.console-options .console-check { justify-content:flex-start; }
+.console-options input[type=checkbox] { accent-color:var(--accent-strong); }
+.developer-console :is(button,input,select,summary):focus-visible,.console-options :is(input,select):focus-visible { outline:2px solid var(--focus); outline-offset:2px; }
+@media(max-width:1000px) {
+  .console-search { order:2; flex-basis:100%; }
+  .console-service { margin-right:auto; }
+  .developer-console .console-viewport { height:calc(100dvh - 300px); }
+}
+@media(max-width:620px) {
+  .console-page-header h1 { width:100%; }
+  .console-page-header .project-shortcuts { flex-wrap:wrap; }
+  .console-service { max-width:100%; }
+  .console-toolbar { gap:4px 2px; }
+  .developer-console .console-viewport { height:65dvh; min-height:280px; }
+  .developer-console .log-row { grid-template-columns:9ch minmax(0,1fr) 24px; gap:3px 6px; padding:5px 6px; }
+  .developer-console .log-row>.log-row-time { grid-column:1; grid-row:1; }
+  .developer-console .log-row>.log-service { grid-column:2; grid-row:1; }
+  .developer-console .log-row>.log-stream { grid-column:1; grid-row:2; }
+  .developer-console .log-row>.log-row-content { grid-column:2/4; grid-row:2; }
+  .developer-console .log-row>.log-copy-row { grid-column:3; grid-row:1; }
+  .developer-console .console-nowrap .log-row { grid-template-columns:9ch minmax(40ch,1fr) 24px; }
+}
+/* Failure summaries stay outside the virtual output viewport. */
+.service-log-issues { display:grid; gap:8px; }
+.service-log-issues:empty { display:none; }
+.service-log-issue { display:flex; align-items:center; flex-wrap:wrap; gap:8px; padding:10px 12px; margin-bottom:10px; border:1px solid var(--border-soft); border-left:3px solid var(--danger); border-radius:6px; background:var(--surface); font-size:12px; color:var(--text); }
+.service-log-issue>span { flex:1; min-width:200px; overflow-wrap:anywhere; line-height:1.6; }
+.log-repeat-summary { display:block; color:var(--text-muted); font:600 10px/1.6 var(--font-ui); margin-bottom:3px; }
+.console-stopbar { display:flex; align-items:center; flex-wrap:wrap; gap:6px; padding:8px; border-bottom:1px solid var(--border-soft); background:var(--surface); }
+.console-stopbar>span { color:var(--text-faint); font-size:9px; letter-spacing:.8px; margin-right:4px; }
+.console-stopbar .button { min-height:30px; padding:5px 8px; font-size:11px; white-space:nowrap; }
+.console-stop-count { padding:1px 5px; border-radius:4px; background:var(--surface-soft); color:var(--text-muted); font:10px var(--font-mono); }
+@media(max-width:620px) { .console-stopbar>span:first-child { width:100%; margin-bottom:2px; } .console-stopbar .button { flex:1 1 calc(50% - 6px); } }
+
+.logs-viewer-shell { display:flex; flex-direction:column; flex:1; min-width:0; min-height:0; }
+.logs-viewer-shell>.developer-console { flex:1; }
+.developer-console .log-row-actions { display:flex; flex-direction:column; align-items:center; gap:2px; grid-column:5; }
+.log-row-actions button { display:inline-flex; align-items:center; justify-content:center; min-width:24px; min-height:24px; padding:3px; border:0; border-radius:4px; background:transparent; color:var(--text-muted); cursor:pointer; }
+.log-row-actions button:hover { color:var(--text); background:var(--surface-soft); }
+.log-row-actions [role=alert] { max-width:180px; overflow-wrap:anywhere; color:var(--danger); }
+.log-select-row { float:left; margin:4px 7px 0 0; accent-color:var(--accent-strong); }
+.developer-console .log-row>[hidden] { display:none; }
+.developer-console .log-row>.log-row-time { grid-column:1; }
+.developer-console .log-row>.log-service { grid-column:2; }
+.developer-console .log-row>.log-stream { grid-column:3; }
+.developer-console .log-row>.log-row-content { grid-column:4; }
+.developer-console.hide-log-time .log-row { grid-template-columns:0 minmax(9ch,14ch) 6ch minmax(0,1fr) 26px; }
+.developer-console.hide-log-service .log-row { grid-template-columns:9ch 0 6ch minmax(0,1fr) 26px; }
+.developer-console.hide-log-time.hide-log-service .log-row { grid-template-columns:0 0 6ch minmax(0,1fr) 26px; }
+.floating-menu-panel button:disabled { opacity:.45; cursor:not-allowed; }
+.floating-menu-panel button:disabled:hover { background:transparent; }
+.console-stopbar .qe-service-errors { flex-basis:100%; }
+@media(max-width:640px) {
+  .developer-console .log-row,.shared-console .developer-console .log-row { grid-template-columns:8ch minmax(0,1fr) 26px; }
+  .developer-console.hide-log-time .log-row { grid-template-columns:5ch minmax(0,1fr) 26px; }
+  .developer-console .log-row>.log-row-time { grid-column:1; grid-row:1; }
+  .developer-console .log-row>.log-service { grid-column:2; grid-row:1; }
+  .developer-console .log-row>.log-stream { grid-column:1; grid-row:2; }
+  .developer-console .log-row>.log-row-content { grid-column:2; grid-row:2; }
+  .developer-console .log-row>.log-row-actions { grid-column:3; grid-row:1/3; }
+}

@@ -1,0 +1,1 @@
+{"identifier":"logs","description":"Floating log windows use events and guarded native log commands","windows":["logs-*"],"permissions":["core:default"]}

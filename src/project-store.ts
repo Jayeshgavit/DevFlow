@@ -74,6 +74,16 @@ export class ProjectStore {
     });
   }
 
+  renameProject(id: string, name: string): Promise<void> {
+    this.requireReady();
+    const trimmedName = name.trim();
+    if (!trimmedName) throw new Error('Project name cannot be empty.');
+    return this.updateAndSave(projects => {
+      if (!projects.some(project => project.id === id)) throw new Error('Project no longer exists.');
+      return projects.map(project => project.id === id ? { ...project, name: trimmedName } : project);
+    });
+  }
+
   private requireReady(): void {
     if (this.snapshot.status !== 'ready') throw new Error('Projects could not be loaded. Retry Load before changing saved projects.');
   }

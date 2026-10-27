@@ -2,6 +2,8 @@
 
 You are developing DevFlow, a Windows-first local development workspace manager, **not** a code editor.
 
+Before modifying DevFlow, read docs/ARCHITECTURE.md and inspect only the files relevant to the requested feature. Update the architecture document when module responsibilities or integrations change.
+
 ## Primary mission
 Import project root -> detect services -> user reviews commands -> one-click run -> separate/combined logs -> stop/restart reliably.
 
