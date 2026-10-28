@@ -3,7 +3,7 @@ import { OperationNotice } from './NotificationCenter';
 import { errorMessage } from './operation-error';
 import React, { lazy, Suspense, useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { Braces, Check, ChevronDown, ChevronRight, ChevronsUpDown, Clipboard, Code2, Copy, FileCode2, FileText, FolderClosed, FolderOpen, ListTree, Loader2, PanelLeftClose, PanelLeftOpen, Pencil, RefreshCw, RotateCcw, RotateCw, Save, Search, ExternalLink, PanelBottom, PanelBottomClose, Sparkles, X } from 'lucide-react';
+import { Bot, Braces, Check, ChevronDown, ChevronRight, ChevronsUpDown, Clipboard, Code2, Copy, FileCode2, FileText, FolderClosed, FolderOpen, ListTree, Loader2, PanelLeftClose, PanelLeftOpen, Pencil, RefreshCw, RotateCcw, RotateCw, Save, Search, ExternalLink, PanelBottom, PanelBottomClose, Sparkles, X } from 'lucide-react';
 import Markdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { Button, ConfirmDialog } from './components';
@@ -14,16 +14,28 @@ import { closeTab, renameTabs, renamedPath, sessionDirty, tabDirty, tabKey, type
 import { EditorContextMenu, EditorNameDialog, type MenuAction } from './EditorContextMenu';
 import { useMenuDismissal } from './menu-dismissal';
 import EditorHistory from './EditorHistory';
+import SmartReplace, { type SmartReview, type SmartTarget } from './SmartReplace';
+import PasteAsNewFile from './PasteAsNewFile';
+import { parseNewFiles } from './paste-new-file';
+import type { NewFileInput, NewFileOutcome } from './editor-api';
+import { parseClipboard, relativeClipboardPath, type ClipboardBlock, type ReplaceRange } from './smart-replace';
 import './quick-editor.css';
 import { ProjectServiceAction, ProjectServiceErrors, ProjectServiceStatus } from './ProjectServiceControls';
 import { LogsHeader, ProjectLogs, floatLogs } from './SharedLogs';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { getCurrentWindow } from '@tauri-apps/api/window';
+import { AI_ATTACHMENT_LIMIT, attachmentDuplicate, contextByteSize, fileAttachment, logAttachment, projectContextAttachment, safeAiContext, selectionAttachment, type AiAttachment } from './ai-context';
+import type { LogEntry } from './log-utils';
 
 const EditorSurface = lazy(() => import('./EditorSurface'));
+import AiAssistantPanel, { clampAiWidth, type AiProvider, type ChatMessage } from './AiAssistantPanel';
+import BrainQueue from './BrainQueue';
 type FolderState = { entries?: FileEntry[]; error?: string; loading?: boolean };
 const initialWidth = () => { try { return Math.max(180, Math.min(400, Number(localStorage.getItem('devflow-editor-width')) || 260)); } catch { return 260; } };
+const initialAiWidth = () => { try { return Math.max(260, Math.min(550, Number(localStorage.getItem('devflow-ai-width')) || 340)); } catch { return 340; } };
+const initialAiOpen = () => { try { return localStorage.getItem('devflow-ai-open') === 'true'; } catch { return false; } };
+const initialAiProvider = (): AiProvider => { try { const stored = localStorage.getItem('devflow-ai-provider'); return stored === 'nvidia-nim' ? 'nvidia-nim' : 'openrouter'; } catch { return 'openrouter'; } };
 
 function FileIcon({ name }: { name: string }) {
   return isMarkdown(name) ? <FileText size={15} className="qe-icon-markdown" /> : /\.(json|css)$/i.test(name) ? <Braces size={15} className="qe-icon-data" /> : <FileCode2 size={15} className="qe-icon-code" />;
@@ -42,10 +54,11 @@ export default function QuickEditor({ projects, selected, initial, floating = fa
   type LogLocation = { projectId: string; path: string; line: number };
   const [pendingLocation, setPendingLocation] = useState<LogLocation>();
   const [logJump, setLogJump] = useState<LogLocation>();
-  const [workspace, setWorkspace] = useState<Project | undefined>(initial ? initial.workspace : selected);
-  const [logsOpen, setLogsOpen] = useState(false);
+  const [workspace, setWorkspace] = useState<Project | undefined>(initial ? initial.workspace : (() => { try { return projects.find(p => p.id === localStorage.getItem('devflow-editor-project')) || selected || projects[0]; } catch { return selected || projects[0]; } })());
+  const workspaceRef = useRef(workspace); workspaceRef.current = workspace;
+  const [logsOpen, setLogsOpen] = useState(initial?.layout?.logsOpen || false);
   const [logsCollapsed, setLogsCollapsed] = useState(false);
-  const [logsHeight, setLogsHeight] = useState(330);
+  const [logsHeight, setLogsHeight] = useState(initial?.layout?.logsHeight || 330);
   const [pendingLogs, setPendingLogs] = useState<string[]>([]);
   const layout = useRef<HTMLDivElement>(null);
   const [lease, setLease] = useState<number>();
@@ -65,7 +78,7 @@ export default function QuickEditor({ projects, selected, initial, floating = fa
     return () => { disposed = true; };
   }, [visible, logsOpen, workspace?.id, pendingLogs]);
   const [folders, setFolders] = useState<Record<string, FolderState>>({});
-  const [expanded, setExpanded] = useState(new Set(['']));
+  const [expanded, setExpanded] = useState(new Set(initial?.layout?.expanded || ['']));
   const [tabs, setTabs] = useState<EditorTab[]>(initial?.tabs || []);
   const tabsRef = useRef(tabs); tabsRef.current = tabs;
   const [path, setPath] = useState(initial?.active || '');
@@ -82,6 +95,9 @@ export default function QuickEditor({ projects, selected, initial, floating = fa
   const [loadedVersion, setLoadedVersion] = useState(0);
   const [saving, setSaving] = useState(false);
   const [historyOpen, setHistoryOpen] = useState(false);
+  const [smart, setSmart] = useState<{ blocks: ClipboardBlock[]; selection?: ReplaceRange }>();
+  const [pasting, setPasting] = useState<{ blocks: ClipboardBlock[]; folder: string }>();
+  const smartReading = useRef(false);
   const [error, setError] = useOperationError();
   const [notice, setNotice] = useState('');
   const [menu, setMenu] = useState<{ x: number; y: number; entry?: FileEntry }>();
@@ -98,7 +114,23 @@ export default function QuickEditor({ projects, selected, initial, floating = fa
   const [selection, setSelection] = useState({ from: 1, to: 1, selected: false });
   const [width, setWidth] = useState(initial?.width ?? initialWidth);
   const [collapsed, setCollapsed] = useState(initial?.collapsed || false);
+  const [aiOpen, setAiOpen] = useState(initial?.ai?.open ?? initialAiOpen);
+  const [aiWidth, setAiWidth] = useState(initial?.ai?.width ?? initialAiWidth);
+  const [aiProvider, setAiProvider] = useState<AiProvider>(initial?.ai?.provider ?? initialAiProvider);
+  const [aiAttachments, setAiAttachments] = useState<AiAttachment[]>(initial?.ai?.attachments || []);
+  const aiAttachmentsRef = useRef(aiAttachments); aiAttachmentsRef.current = aiAttachments;
+  const updateAiAttachments = useCallback((next: AiAttachment[]) => { aiAttachmentsRef.current = next; setAiAttachments(next); }, []);
+  const [checkedLogEntries, setCheckedLogEntries] = useState<LogEntry[]>([]);
+  const [aiModel, setAiModel] = useState(() => { try { return initial?.ai?.model ?? localStorage.getItem('devflow-ai-model') ?? ''; } catch { return ''; } });
+  const [aiDraft, setAiDraft] = useState(initial?.ai?.draft || '');
+  const aiMessages = useRef<ChatMessage[]>(initial?.ai?.messages || []);
+  const aiStreaming = useRef(false);
+  const flushAi = useRef<() => Promise<void>>(async () => {});
+  const aiReviewed = useRef(initial?.ai?.reviewed || '');
   const [outlineOpen, setOutlineOpen] = useState(false);
+  const [copyScope, setCopyScope] = useState<'selection' | 'section' | 'all'>('all');
+  const [copyBudget, setCopyBudget] = useState(16384);
+  const [copyCustom, setCopyCustom] = useState(false);
   const [copyOpen, setCopyOpen] = useState(false);
   const copyMenu = useRef<HTMLDetailsElement>(null);
   const copyTrigger = useRef<HTMLElement>(null);
@@ -120,6 +152,91 @@ export default function QuickEditor({ projects, selected, initial, floating = fa
   const unsaved = useRef(false); unsaved.current = sessionDirty(tabs) || saving || working;
   const markdown = isMarkdown(path) && !(logJump && logJump.projectId === workspace?.id && tabKey(logJump.path) === tabKey(path));
   const writable = document && !document.readOnly && document.lineEnding !== 'mixed';
+  const smartContext = useRef({ workspace, path, lease, text, loadedVersion });
+  smartContext.current = { workspace, path, lease, text, loadedVersion };
+  useEffect(() => { setSmart(undefined); }, [workspace?.id, workspace?.root, path, lease, loadedVersion, text]);
+  useEffect(() => { setPasting(undefined); }, [workspace?.id, workspace?.root, lease, transferring, closing]);
+
+  const startPasteNew = async (folder = '') => {
+    if (!workspace || lease === undefined || smartReading.current || smart || pasting || naming || historyOpen || loading || saving || working || transferring || closing) return;
+    smartReading.current = true;
+    const context = smartContext.current;
+    try {
+      const blocks = parseNewFiles(await navigator.clipboard.readText());
+      const current = smartContext.current;
+      if (current.workspace?.id !== context.workspace?.id || current.workspace?.root !== context.workspace?.root || current.lease !== context.lease || workLock.current || saveLock.current || transferLock.current || closeLock.current) throw new Error('Project or editor ownership changed. Try again.');
+      setPasting({ blocks, folder });
+    } catch (cause) { setError(errorMessage(cause)); }
+    finally { smartReading.current = false; }
+  };
+
+  const startSmartReplace = async () => {
+    if (!workspace || !active || lease === undefined || smartReading.current || smart || historyOpen || loading || saving || working || transferring || closing) return;
+    smartReading.current = true;
+    const context = smartContext.current;
+    const selected = editor.current?.selectionRange();
+    try {
+      const blocks = parseClipboard(await navigator.clipboard.readText());
+      if ((smartContext.current.workspace?.id !== context.workspace?.id || smartContext.current.workspace?.root !== context.workspace?.root || smartContext.current.path !== context.path || smartContext.current.lease !== context.lease || smartContext.current.text !== context.text || smartContext.current.loadedVersion !== context.loadedVersion)) throw new Error('Editor changed while reading the clipboard. Try again.');
+      setSmart({ blocks, selection: selected ? { ...selected, label: 'Current editor selection' } : undefined });
+    } catch (cause) { setError(errorMessage(cause)); }
+    finally { smartReading.current = false; }
+  };
+
+  const loadSmartTarget = async (next: string): Promise<SmartTarget> => {
+    if (!workspace) throw new Error('Select a saved project.');
+    relativeClipboardPath(next);
+    const tab = tabsRef.current.find(tab => tabKey(tab.path) === tabKey(next));
+    // Reuse Rust export guards for exclusions, secrets, UTF-8, saved roots,
+    // ignored paths, linked directories, and the conservative 256 KiB limit.
+    await editorApi.validateAiFile(workspace, next, tab?.text || '');
+    const disk = await editorApi.read(workspace, next);
+    if (disk.readOnly || disk.lineEnding === 'mixed') throw new Error('Read-only and mixed-line-ending files cannot be replaced.');
+    if (tab && tab.document.content !== disk.content) throw new Error('File changed externally. Reconcile the tab with disk before Smart Replace.');
+    const text = normalizeText(disk.content);
+    return { disk: disk.content, tab: tab || { path: next, document: disk, baseline: text, text, editing: false, surfaceOpened: true, backup: '' } };
+  };
+
+  const searchSmartTargets = async (name: string) => {
+    if (!workspace || /^(app|main|index|default|render|test|init)$/i.test(name)) return [];
+    const result: string[] = [], queue = [''];
+    let entries = 0, directories = 0;
+    const skip = /^(?:\.|node_modules$|vendor$|dist$|build$|target$|out$|coverage$|venv$|__pycache__$|bin$|obj$|secrets$|credentials$|keys$|certs$)/i;
+    while (queue.length && directories++ < 24 && entries < 400 && result.length < 20) {
+      const folder = queue.shift()!;
+      const listed = await editorApi.list(workspace, folder);
+      for (const entry of listed) {
+        if (++entries > 400) break;
+        if (entry.blocked || skip.test(entry.name)) continue;
+        if (entry.directory) { if (entry.path.split('/').length < 4) queue.push(entry.path); }
+        else if (entry.name.split('.')[0].toLowerCase() === name.toLowerCase()) {
+          try { await editorApi.validateAiFile(workspace, entry.path, ''); result.push(entry.path); } catch { /* Excluded files never become candidates. */ }
+        }
+      }
+    }
+    return result;
+  };
+
+  const applySmartReplace = async (review: SmartReview) => {
+    if (!workspace || lease === undefined || closeLock.current || saveLock.current || workLock.current || transferLock.current || loading) throw new Error('Editor is busy. Reopen Smart Replace.');
+    const context = smartContext.current;
+    workLock.current = true; setWorking(true);
+    try {
+      await editorApi.validateAiFile(workspace, review.target.tab.path, review.result);
+      const disk = await editorApi.read(workspace, review.target.tab.path);
+      const owner = await editorApi.lease();
+      if (owner !== lease || (smartContext.current.workspace?.id !== context.workspace?.id || smartContext.current.workspace?.root !== context.workspace?.root || smartContext.current.path !== context.path || smartContext.current.lease !== context.lease || smartContext.current.text !== context.text || smartContext.current.loadedVersion !== context.loadedVersion) || disk.content !== review.target.disk) throw new Error('Source, project, or writer ownership changed. Reopen and review again.');
+      const existing = tabsRef.current.find(tab => tabKey(tab.path) === tabKey(review.target.tab.path));
+      if (existing && (existing.text !== review.target.tab.text || existing.document.content !== review.target.tab.document.content)) throw new Error('Draft changed after preview. Reopen Smart Replace.');
+      if (!existing && (tabsRef.current.length >= 20 || tabsRef.current.reduce((size, tab) => size + tab.text.length + tab.document.content.length, 0) >= 16 * 1024 * 1024)) throw new Error('Close some tabs before applying to another file.');
+      if (tabKey(path) === tabKey(review.target.tab.path) && editor.current && !editor.current.replaceRange(review.target.tab.text, review.range.from, review.range.to, review.insertion)) throw new Error('Editor source changed. Reopen and review again.');
+      const updated = { ...(existing || review.target.tab), text: review.result, editing: true, surfaceOpened: true };
+      const next = existing ? tabsRef.current.map(tab => tab === existing ? updated : tab) : [...tabsRef.current, updated];
+      tabsRef.current = next; setTabs(next);
+      if (tabKey(path) !== tabKey(updated.path)) selectTab(updated.path);
+      setNotice('Replacement applied to draft · Ctrl+S to save and create a snapshot');
+    } finally { workLock.current = false; setWorking(false); }
+  };
 
   const guard = useCallback((action: () => void) => {
     if (saveLock.current || workLock.current) return;
@@ -135,13 +252,115 @@ export default function QuickEditor({ projects, selected, initial, floating = fa
     } catch (cause) { if (epoch.current === generation) setFolders(current => ({ ...current, [folder]: { error: errorMessage(cause) } })); }
   }, []);
 
+  const addAiAttachment = useCallback((attachment: Omit<AiAttachment, 'id'>) => {
+    try {
+      if (attachment.projectId !== workspaceRef.current?.id) return;
+      const content = safeAiContext(attachment.content);
+      const existing = aiAttachmentsRef.current.some(item => item.projectId !== attachment.projectId) ? [] : aiAttachmentsRef.current;
+      if (existing.reduce((size, item) => size + contextByteSize(item.content), 0) + contextByteSize(content) > AI_ATTACHMENT_LIMIT) throw new Error('Attachments together are limited to 12,000 UTF-8 bytes. Remove an attachment before adding this context.');
+      if (attachmentDuplicate(existing, { ...attachment, content })) { setNotice('Already attached · remove the existing snapshot before replacing it'); return; }
+      const next = [...existing, { ...attachment, id: `ctx_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`, content }];
+      aiAttachmentsRef.current = next;
+      updateAiAttachments(next);
+      setError('');
+    } catch (cause) { setError(errorMessage(cause)); }
+  }, [setError, updateAiAttachments]);
+
+  const attachCurrentFile = async () => {
+    if (!workspace || !document || !path || loading || working || saving) return;
+    const attachmentsAtStart = aiAttachmentsRef.current;
+    try {
+      const source = normalizeText(dirty ? text : document.content);
+      await editorApi.validateAiFile(workspace, path, source);
+      if (aiAttachmentsRef.current !== attachmentsAtStart || workspaceRef.current?.id !== workspace.id || workspaceRef.current?.root !== workspace.root) return;
+      const language = ({ ts: 'typescript', tsx: 'typescript', js: 'javascript', jsx: 'javascript', py: 'python', rs: 'rust', json: 'json', md: 'markdown', html: 'html', css: 'css' } as Record<string, string>)[extension(path)] || 'text';
+      const fenceSize = Array.from(source.matchAll(/`+/g), match => match[0].length + 1).reduce((max, size) => Math.max(max, size), 3);
+      const fence = '`'.repeat(fenceSize);
+      addAiAttachment(fileAttachment(workspace.id, workspace.name, path, language, `${fence}${language}\n${source}\n${fence}`, dirty));
+    } catch (cause) { setError(`${errorMessage(cause)} AI sharing is blocked when a file is sensitive, excluded, unsupported, or exceeds the secure export limit.`); }
+  };
+
+  const attachSelectedCode = async () => {
+    if (!workspace || !document || !selection.selected || loading || saving || working) return;
+    const attachmentsAtStart = aiAttachmentsRef.current;
+    try {
+      const slice = editor.current?.slice('selection');
+      if (!slice?.text) { setError('Select code in the editor before attaching it.'); return; }
+      await editorApi.validateAiFile(workspace, path, normalizeText(dirty ? text : document.content));
+      if (aiAttachmentsRef.current !== attachmentsAtStart || workspaceRef.current?.id !== workspace.id || workspaceRef.current?.root !== workspace.root) return;
+      const language = extension(path).toLowerCase() || 'text';
+      const fenceSize = Array.from(slice.text.matchAll(/`+/g), match => match[0].length + 1).reduce((max, size) => Math.max(max, size), 3);
+      const fence = '`'.repeat(fenceSize);
+      addAiAttachment(selectionAttachment(workspace.id, workspace.name, path, language, `${fence}${language}\n${slice.text}\n${fence}`, slice.from, slice.to, dirty));
+    } catch (cause) { setError(`${errorMessage(cause)} AI sharing is blocked when a file is sensitive, excluded, unsupported, or exceeds the secure export limit.`); }
+  };
+
+  const attachProjectContext = async () => {
+    if (!workspace || loading || working) return;
+    const attachmentsAtStart = aiAttachmentsRef.current;
+    try {
+      const tree = await editorApi.export(workspace, '', 'tree');
+      if (aiAttachmentsRef.current !== attachmentsAtStart || workspaceRef.current?.id !== workspace.id || workspaceRef.current?.root !== workspace.root) return;
+      addAiAttachment(projectContextAttachment(workspace.id, workspace.name, workspace.services, tree.text));
+    } catch (cause) { setError(`Could not create project context: ${errorMessage(cause)}`); }
+  };
+
+  const attachLogs = useCallback((entries: LogEntry[], label: string) => {
+    if (!workspace) return;
+    try { addAiAttachment(logAttachment(workspace.id, workspace.name, workspace.services, entries, label)); }
+    catch (cause) { setError(errorMessage(cause)); }
+  }, [workspace, addAiAttachment, setError]);
+
   const switchProject = useCallback((project?: Project) => {
+    if (aiStreaming.current) { setError('Stop the AI response before switching projects.'); return; }
+    void flushAi.current().catch(cause => setError(String(cause)));
+    aiMessages.current = []; aiReviewed.current = ''; setAiDraft('');
     epoch.current++; fileRequest.current++;
-    setWorkspace(project); setFolders({}); setExpanded(new Set([''])); setPath(''); setTabs([]); setError(''); setNotice(''); setLoading(false);
+    workspaceRef.current = project; updateAiAttachments([]); setWorkspace(project); setCheckedLogEntries([]); setFolders({}); setExpanded(new Set([''])); setPath(''); setTabs([]); setError(''); setNotice(''); setLoading(false);
     if (project) void listFolder('', project, epoch.current);
-  }, [listFolder]);
+  }, [listFolder, updateAiAttachments]);
 
   useEffect(() => { if (workspace) void listFolder('', workspace, epoch.current); }, []);
+  const restoredWorkspace = useRef('');
+  useEffect(() => {
+    if (!workspace || lease === undefined || restoredWorkspace.current === workspace.id) return;
+    restoredWorkspace.current = workspace.id;
+    if (initial) return;
+    let disposed = false;
+    const project = workspace;
+    void (async () => {
+      try {
+        const raw = JSON.parse(localStorage.getItem(`devflow-workspace:${project.id}`) || 'null');
+        if (!raw || raw.root !== project.root) return;
+        setLogsOpen(raw.logsOpen === true); setLogsHeight(Math.max(180, Math.min(600, Number(raw.logsHeight) || 330)));
+        const folders = Array.isArray(raw.expanded) ? raw.expanded.filter((p: unknown): p is string => typeof p === 'string').slice(0, 100) : [''];
+        for (const folder of folders) { if (disposed) return; await listFolder(folder, project, epoch.current); }
+        if (!disposed) setExpanded(new Set(folders));
+        const paths: string[] = Array.isArray(raw.paths) ? [...new Set<string>(raw.paths.filter((p: unknown): p is string => typeof p === 'string'))].slice(0, 20) : [];
+        const restored: EditorTab[] = [];
+        for (const file of paths) {
+          if (disposed) return;
+          try {
+            // Guarded export checks exclusions before restoring any file contents.
+            const allowed = await editorApi.export(project, file, 'file'); if (!allowed.files) continue;
+            const document = await editorApi.read(project, file); const text = normalizeText(document.content);
+            restored.push({ path: file, document, baseline: text, text, editing: false, surfaceOpened: !isMarkdown(file), backup: '' });
+          } catch { /* Missing or excluded paths are not restored. */ }
+        }
+        if (!disposed) { setTabs(current => current.length ? current : restored); setPath(current => current || restored.find(t => t.path === raw.active)?.path || restored[0]?.path || ''); }
+      } catch { /* Invalid optional UI metadata is ignored. */ }
+    })();
+    return () => { disposed = true; };
+  }, [workspace?.id, lease]);
+  useEffect(() => {
+    if (!workspace || lease === undefined) return;
+    const timer = setTimeout(() => { try {
+      localStorage.setItem('devflow-editor-project', workspace.id);
+      localStorage.setItem(`devflow-workspace:${workspace.id}`, JSON.stringify({ root: workspace.root, paths: tabs.map(t => t.path).slice(-20), active: path, expanded: [...expanded].slice(0, 100), logsOpen, logsHeight }));
+    } catch { /* Workspace remains usable when optional metadata storage is full. */ } }, 1000);
+    return () => clearTimeout(timer);
+  }, [workspace, lease, tabs, path, expanded, logsOpen, logsHeight]);
+
   useEffect(() => {
     if (workspace && !projects.some(p => p.id === workspace.id)) {
       // Keep an orphaned draft available to copy after a project is removed.
@@ -150,6 +369,11 @@ export default function QuickEditor({ projects, selected, initial, floating = fa
     }
   }, [projects, workspace, switchProject]);
   useEffect(() => { try { localStorage.setItem('devflow-editor-width', String(width)); } catch { /* Optional preference. */ } }, [width]);
+  useEffect(() => { try { localStorage.setItem('devflow-ai-open', String(aiOpen)); } catch { /* Optional preference. */ } }, [aiOpen]);
+  useEffect(() => { try { localStorage.setItem('devflow-ai-width', String(aiWidth)); } catch { /* Optional preference. */ } }, [aiWidth]);
+  useEffect(() => { try { localStorage.setItem('devflow-ai-provider', aiProvider); } catch { /* Optional preference. */ } }, [aiProvider]);
+  useEffect(() => { try { localStorage.setItem('devflow-ai-model', aiModel); } catch { /* Optional preference. */ } }, [aiModel]);
+  useEffect(() => { try { sessionStorage.setItem('devflow-ai-draft', aiDraft); } catch { /* Optional preference. */ } }, [aiDraft]);
   useEffect(() => { if (!notice) return; const timer = setTimeout(() => setNotice(''), 3500); return () => clearTimeout(timer); }, [notice]);
 
   useEffect(() => {
@@ -162,8 +386,8 @@ export default function QuickEditor({ projects, selected, initial, floating = fa
         setError('Wait for the current editor operation to finish before closing.');
         request.detail(false);
       } else if (unsaved.current) {
-        setConfirm({ description: 'Close and discard all open files’ unsaved edits? Copy your changes first if you need to keep them.', action: () => request.detail(true), cancel: () => request.detail(false) });
-      } else request.detail(true);
+        setConfirm({ description: 'Close and discard all open files’ unsaved edits? Copy your changes first if you need to keep them.', action: () => { void flushAi.current().then(() => request.detail(true)).catch(cause => { setError(String(cause)); request.detail(false); }); }, cancel: () => request.detail(false) });
+      } else { if (aiStreaming.current) { setError('Stop the AI response before closing; partial messages are retained.'); request.detail(false); } else void flushAi.current().then(() => request.detail(true)).catch(cause => { setError(String(cause)); request.detail(false); }); }
     };
     const approveClose = () => { allowClose.current = true; closeLock.current = true; setClosing(true); setMenu(undefined); setNaming(undefined); };
     const cancelClose = () => { allowClose.current = false; closeLock.current = false; setClosing(false); };
@@ -194,7 +418,7 @@ export default function QuickEditor({ projects, selected, initial, floating = fa
   const transfer = async () => {
     if (closeLock.current || saveLock.current || workLock.current || loading || transferLock.current || naming) return;
     transferLock.current = true; setTransferring(true); setError('');
-    try { await onTransfer({ workspace, tabs, active: path, width, collapsed }); }
+    try { if (aiStreaming.current) throw new Error('Stop the AI response before moving the editor. Partial responses are retained.'); await flushAi.current(); await onTransfer({ workspace, tabs, active: path, width, collapsed, layout: { logsOpen, logsHeight, expanded: [...expanded] }, ai: { open: aiOpen, width: aiWidth, provider: aiProvider, model: aiModel, draft: aiDraft, messages: aiMessages.current, attachments: aiAttachments, reviewed: aiReviewed.current } }); }
     catch (cause) {
       setError(errorMessage(cause), true);
       // A failed window creation rotates the backend lease while retaining this draft.
@@ -248,7 +472,7 @@ export default function QuickEditor({ projects, selected, initial, floating = fa
   }, [pendingLocation, workspace?.id, saving, loading, transferring, working]);
 
   const save = async () => {
-    if (historyOpen || closeLock.current || !workspace || !document || !editing || !dirty || !writable || saveLock.current || workLock.current || loading || transferLock.current || lease === undefined || naming) return;
+    if (smart || historyOpen || closeLock.current || !workspace || !document || !editing || !dirty || !writable || saveLock.current || workLock.current || loading || transferLock.current || lease === undefined || naming) return;
     saveLock.current = true; setSaving(true); setError(''); setNotice('');
     const content = diskText(text, document);
     try {
@@ -271,7 +495,20 @@ export default function QuickEditor({ projects, selected, initial, floating = fa
   };
   const copySlice = (kind: 'selection' | 'lines' | 'section' | 'all', ai = false) => {
     const slice = markdown && !editing ? { text, from: 1, to: text.split('\n').length } : editor.current?.slice(kind);
-    if (slice) void runAction(async () => { if (ai && workspace) await editorApi.export(workspace, path, 'file', text); await copy(ai ? aiContext(path, slice) : slice.text, ai ? 'AI context copied' : 'Code copied'); });
+    if (slice) void runAction(async () => {
+      if (ai && workspace) {
+        await editorApi.validateAiFile(workspace, path, text);
+        const original = contextByteSize(slice.text);
+        if (original > copyBudget) {
+          let size = 0; const complete: string[] = [];
+          for (const line of slice.text.split('\n')) { const bytes = contextByteSize(line) + 1; if (size + bytes > copyBudget) break; complete.push(line); size += bytes; }
+          slice.text = complete.join('\n'); slice.to = slice.from + Math.max(0, complete.length - 1);
+          setCopyWarnings([`Context truncated at a complete line: ${original.toLocaleString()} bytes exceeds the ${copyBudget.toLocaleString()} byte budget.`]);
+        }
+        if (copyBudget >= 49152 && !window.confirm(`Copy approximately ${contextByteSize(slice.text).toLocaleString()} bytes of code? These budgets are not token counts.`)) return;
+      }
+      await copy(ai ? aiContext(path, slice) : slice.text, ai ? 'AI context copied' : 'Code copied');
+    });
   };
 
   const runAction = async (action: () => Promise<void>) => {
@@ -300,12 +537,12 @@ export default function QuickEditor({ projects, selected, initial, floating = fa
     setCopyWarnings(result.warnings);
     await copy(result.text, `${mode === 'tree' ? 'Folder tree' : 'AI context'} copied · ${result.files} files${tab && tabDirty(tab) ? ' · includes draft' : ''}`);
   };
-  const applyName = async (name: string) => {
+  const applyName = async (name: string, createParents = false) => {
     if (!workspace || !naming || lease === undefined || workLock.current || saveLock.current) return;
     const operation = naming;
     workLock.current = true; setWorking(true); setNameError('');
     try {
-      const next = await editorApi.mutate(workspace, operation.entry.path, operation.action, name, lease);
+      const next = await editorApi.mutate(workspace, operation.entry.path, operation.action, name, lease, createParents);
       if (operation.action === 'rename') {
         setTabs(current => renameTabs(current, operation.entry.path, next));
         setPath(current => renamedPath(current, operation.entry.path, next));
@@ -317,7 +554,38 @@ export default function QuickEditor({ projects, selected, initial, floating = fa
     } catch (cause) { setNameError(errorMessage(cause)); }
     finally { workLock.current = false; setWorking(false); }
   };
+  const createPastedFiles = async (files: NewFileInput[], parents: boolean): Promise<NewFileOutcome> => {
+    if (!workspace || lease === undefined || workLock.current || saveLock.current || transferLock.current || closeLock.current || loading) throw new Error('Editor is busy. Review again.');
+    const fresh = files.filter(file => !tabsRef.current.some(tab => tabKey(tab.path) === tabKey(file.path)));
+    const size = tabsRef.current.reduce((total, tab) => total + tab.text.length + tab.document.content.length, 0);
+    if (tabsRef.current.length + fresh.length > 20 || size + fresh.reduce((total, file) => total + file.content.length * 2, 0) > 16 * 1024 * 1024) throw new Error('Close some tabs before creating files (20 tabs / 16 MiB text budget).');
+    workLock.current = true; setWorking(true);
+    try {
+      const current = smartContext.current;
+      if (current.workspace?.id !== workspace.id || current.workspace.root !== workspace.root || current.lease !== lease) throw new Error('Project changed. Reopen the dialog.');
+      const outcome = await editorApi.createFiles(workspace, files, lease, false, parents);
+      if (smartContext.current.workspace?.id !== workspace.id || smartContext.current.workspace?.root !== workspace.root || smartContext.current.lease !== lease) throw new Error('Editor changed after creation. Inspect the project before retrying.');
+      if (outcome.items.some(item => item.created) || outcome.directories.length) {
+        const generation = ++epoch.current;
+        await Promise.allSettled([...new Set(['', ...expanded])].map(folder => listFolder(folder, workspace, generation)));
+        for (const item of outcome.items.filter(item => item.created)) {
+          // Preserve drafts and avoid the existing-file save/snapshot pipeline.
+          try {
+            const existing = tabsRef.current.find(tab => tabKey(tab.path) === tabKey(item.path));
+            if (existing) { selectTab(existing.path); continue; }
+            const document = await editorApi.read(workspace, item.path);
+            const text = normalizeText(document.content);
+            const tab: EditorTab = { path: item.path, document, text, baseline: text, editing: false, surfaceOpened: !isMarkdown(item.path), backup: '' };
+            const next = [...tabsRef.current, tab]; tabsRef.current = next; setTabs(next); selectTab(item.path);
+          } catch (cause) { item.error = [item.error, `Created, but could not open: ${errorMessage(cause)}`].filter(Boolean).join(' '); }
+        }
+        setNotice(`Created ${outcome.items.filter(item => item.created).length} file(s)${outcome.items.some(item => item.error) ? ' · review reported errors' : ' · opened in Quick Editor'}`);
+      }
+      return outcome;
+    } finally { workLock.current = false; setWorking(false); }
+  };
   const menuActions = (): MenuAction[] => {
+    // Clipboard creation shares the existing project/window authorization.
     if (menu?.entry) {
       const entry = menu.entry;
       const full = workspace ? `${workspace.root.replace(/[\\/]$/, '')}${entry.path ? `\\${entry.path.replace(/\//g, '\\')}` : ''}` : '';
@@ -325,6 +593,7 @@ export default function QuickEditor({ projects, selected, initial, floating = fa
       const name = entry.directory ? 'Folder' : 'File';
       return [
         ...(entry.directory ? ['file', 'folder'].map(action => ({ label: action === 'file' ? 'New File' : 'New Folder', disabled: lease === undefined || entry.blocked, run: () => { setNameError(''); setNaming({ entry, action: action as 'file' | 'folder' }); } })) : [{ label: 'Open', disabled: entry.blocked, run: () => openFile(entry.path) }]),
+        ...(entry.directory ? [{ label: 'Paste as New File…', disabled: lease === undefined || entry.blocked, run: () => startPasteNew(entry.path) }] : []),
         { label: 'Rename', disabled: !entry.path || entry.blocked || lease === undefined, run: () => { setNameError(''); setNaming({ entry, action: 'rename' }); } },
         guarded(`Copy ${name} Name`, () => copy(entry.name, 'Name copied')),
         guarded('Copy Relative Path', () => copy(entry.path || '.', 'Relative path copied')),
@@ -334,6 +603,8 @@ export default function QuickEditor({ projects, selected, initial, floating = fa
       ];
     }
     return [
+      { label: 'Smart Replace from Clipboard…', disabled: !workspace || !document || lease === undefined, run: startSmartReplace },
+      { label: 'Paste as New File…', disabled: !workspace || lease === undefined, run: () => startPasteNew() },
       ...(['cut', 'copy', 'paste'] as const).map(action => ({ label: action[0].toUpperCase() + action.slice(1), disabled: !document || (action === 'paste' ? !editing : !selection.selected) || (action === 'cut' && !editing), run: async () => { try { await editor.current?.clipboard(action); } catch (cause) { setError(`Clipboard unavailable: ${errorMessage(cause)}`, false); } } })),
       { label: 'Select All', disabled: !surfaceOpened || markdown && !editing, run: () => editor.current?.selectAll() },
       { label: 'Copy Selection for AI', disabled: !document || !selection.selected, run: () => copySlice('selection', true) },
@@ -382,14 +653,14 @@ export default function QuickEditor({ projects, selected, initial, floating = fa
   const tree = useMemo(() => workspace ? renderFolder('', 0) : <div className="qe-tree-message">Choose a saved project above.</div>, [folders, expanded, path, saving, workspace, guard, listFolder, lease]);
 
   return <section className="qe-workspace" ref={container} aria-label="Quick Editor" onContextMenu={event => showMenu(event)}>
-    <fieldset className="qe-session-controls" disabled={closing || transferring || working || !!naming || historyOpen}><header className="qe-heading">
+    <fieldset className="qe-session-controls" disabled={closing || transferring || working || !!naming || historyOpen || !!smart}><header className="qe-heading">
       <div className="qe-heading-context"><h1><Code2 size={18} />Quick Editor</h1><select aria-label="Editor project" value={workspace?.id || ''} disabled={saving} onChange={event => guard(() => switchProject(projects.find(p => p.id === event.target.value)))}><option value="">Select a project</option>{projects.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}</select>{workspace && <ProjectServiceStatus project={workspace} />}</div>
-      <div className="qe-heading-actions"><ProjectServiceAction project={workspace} /><Button tone="quiet" icon={<PanelBottom size={14} />} aria-pressed={logsOpen} aria-expanded={logsOpen} aria-controls="qe-service-logs" disabled={!workspace} title={logsOpen ? 'Hide project logs' : 'Show project logs'} onClick={() => setLogsOpen(value => !value)}>Logs</Button><Button tone="quiet" icon={floating ? <PanelBottomClose size={14} /> : <ExternalLink size={14} />} disabled={saving || loading || transferring || working || !!naming} onClick={() => void transfer()} title={floating ? 'Dock in DevFlow' : 'Open Quick Editor in its own window'}>{transferring ? 'Moving…' : floating ? 'Dock' : 'Float'}</Button></div>
+      <div className="qe-heading-actions"><ProjectServiceAction project={workspace} /><Button tone="quiet" icon={<PanelBottom size={14} />} aria-pressed={logsOpen} aria-expanded={logsOpen} aria-controls="qe-service-logs" disabled={!workspace} title={logsOpen ? 'Hide project logs' : 'Show project logs'} onClick={() => setLogsOpen(value => !value)}>Logs</Button><Button tone="quiet" icon={<Bot size={14} />} aria-pressed={aiOpen} aria-expanded={aiOpen} aria-controls="qe-ai-panel" title={aiOpen ? 'Hide AI Assistant' : 'Show AI Assistant'} onClick={() => setAiOpen(value => !value)}>AI Assistant</Button><Button tone="quiet" icon={floating ? <PanelBottomClose size={14} /> : <ExternalLink size={14} />} disabled={saving || loading || transferring || working || !!naming} onClick={() => void transfer()} title={floating ? 'Dock in DevFlow' : 'Open Quick Editor in its own window'}>{transferring ? 'Moving…' : floating ? 'Dock' : 'Float'}</Button></div>
     </header><ProjectServiceErrors project={workspace} />
     <div className="qe-session-layout" ref={layout}>
-    <div className={`qe-frame ${collapsed ? 'is-collapsed' : ''}`} style={{ '--qe-width': `${width}px` } as React.CSSProperties}>
-      {!collapsed && <><aside className="qe-explorer" aria-label="Project files"><div className="qe-explorer-heading"><span>EXPLORER</span><button title="Refresh file tree" aria-label="Refresh file tree" disabled={!workspace || saving} onClick={() => { setFolders({}); setExpanded(new Set([''])); if (workspace) void listFolder('', workspace, ++epoch.current); }}><RefreshCw size={13} /></button><button title="Collapse explorer" aria-label="Collapse explorer" onClick={() => setCollapsed(true)}><PanelLeftClose size={15} /></button></div><div className="qe-root" title={workspace?.root} onContextMenu={event => showMenu(event, rootEntry)}><FolderOpen size={14} /><strong>{workspace?.name || 'No project selected'}</strong></div><div className="qe-tree" onContextMenu={event => showMenu(event, rootEntry)}>{tree}</div><div className="qe-explorer-footer">Folders load on demand</div></aside>
-      <div className="qe-divider" role="separator" tabIndex={0} aria-label="Resize file explorer; double-click to reset" aria-orientation="vertical" aria-valuemin={180} aria-valuemax={400} aria-valuenow={width} onDoubleClick={() => setWidth(260)} onKeyDown={event => { if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') { event.preventDefault(); setWidth(value => Math.max(180, Math.min(400, value + (event.key === 'ArrowLeft' ? -10 : 10)))); } if (event.key === 'Home') setWidth(260); }} onPointerDown={event => { event.currentTarget.setPointerCapture(event.pointerId); }} onPointerMove={event => { if (event.currentTarget.hasPointerCapture(event.pointerId)) { const left = container.current?.getBoundingClientRect().left || 0; const available = container.current?.clientWidth || 600; setWidth(Math.max(180, Math.min(400, available - 280, event.clientX - left))); } }} onPointerUp={event => { if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId); }} /></>}
+    <div className={`qe-frame ${collapsed ? 'is-collapsed' : ''}`} style={{ '--qe-width': `${width}px`, '--qe-ai-width': `${aiWidth}px` } as React.CSSProperties}>
+      {!collapsed && <><aside className="qe-explorer" aria-label="Project files"><div className="qe-explorer-heading"><span>EXPLORER</span><button title="Refresh file tree" aria-label="Refresh file tree" disabled={!workspace || saving} onClick={() => { setFolders({}); setExpanded(new Set([''])); if (workspace) void listFolder('', workspace, ++epoch.current); }}><RefreshCw size={13} /></button><button title="Collapse explorer" aria-label="Collapse explorer" onClick={() => setCollapsed(true)}><PanelLeftClose size={15} /></button></div><div className="qe-root" title={workspace?.root} onContextMenu={event => showMenu(event, rootEntry)}><FolderOpen size={14} /><strong>{workspace?.name || 'No project selected'}</strong></div><div className="qe-tree" onContextMenu={event => showMenu(event, rootEntry)}>{tree}</div>{workspace && <BrainQueue key={workspace.id} projectId={workspace.id} />}<div className="qe-explorer-footer">Folders load on demand</div></aside>
+      <div className="qe-divider" role="separator" tabIndex={0} aria-label="Resize file explorer; double-click to reset" aria-orientation="vertical" aria-valuemin={180} aria-valuemax={400} aria-valuenow={width} onDoubleClick={() => setWidth(260)} onKeyDown={event => { if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') { event.preventDefault(); setWidth(value => Math.max(180, Math.min(400, value + (event.key === 'ArrowLeft' ? -10 : 10)))); } if (event.key === 'Home') setWidth(260); }} onPointerDown={event => { event.currentTarget.setPointerCapture(event.pointerId); }} onPointerMove={event => { if (event.currentTarget.hasPointerCapture(event.pointerId)) { const left = container.current?.getBoundingClientRect().left || 0; const available = container.current?.clientWidth || 600; const aiSpace = aiOpen ? aiWidth : 0; setWidth(Math.max(180, Math.min(400, available - aiSpace - 280, event.clientX - left))); } }} onPointerUp={event => { if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId); }} /></>}
       <div className="qe-reader">
         {tabs.length > 0 && <div className="qe-tabs" role="tablist" aria-label="Open files" onKeyDown={event => {
           if (!(event.target instanceof HTMLElement) || event.target.getAttribute('role') !== 'tab' || !['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
@@ -397,22 +668,26 @@ export default function QuickEditor({ projects, selected, initial, floating = fa
           const index = buttons.indexOf(event.target as HTMLButtonElement);
           const next = event.key === 'Home' ? 0 : event.key === 'End' ? buttons.length - 1 : (index + (event.key === 'ArrowRight' ? 1 : -1) + buttons.length) % buttons.length;
           event.preventDefault(); buttons[next]?.focus(); buttons[next]?.click();
-        }}>{tabs.map(tab => <div className={`qe-tab ${tab.path === path ? 'is-active' : ''}`} key={tab.path}><button role="tab" aria-selected={tab.path === path} title={tab.path} onClick={() => selectTab(tab.path)} disabled={saving}><span>{tab.path}</span>{tabDirty(tab) && <span aria-label="Unsaved changes">●</span>}</button><button aria-label={`Close ${tab.path}`} title={`Close ${tab.path}`} disabled={saving || loading} onClick={() => {
+        }}>{tabs.map(tab => <div className={`qe-tab ${tab.path === path ? 'is-active' : ''}`} key={tab.path}><button role="tab" aria-selected={tab.path === path} title={tab.path} onClick={() => selectTab(tab.path)} disabled={saving}><FileIcon name={tab.path} /><span>{tab.path}</span>{tabDirty(tab) && <span aria-label="Unsaved changes">●</span>}</button><button aria-label={`Close ${tab.path}`} title={`Close ${tab.path}`} disabled={saving || loading} onClick={() => {
           const remove = () => { const result = closeTab(tabs, path, tab.path); setTabs(result.tabs); setPath(result.active); setLoadedVersion(value => value + 1); };
           if (tabDirty(tab)) setConfirm({ description: `Discard unsaved changes in ${tab.path}?`, action: remove }); else remove();
         }}><X size={13} /></button></div>)}</div>}
 
         <div className="qe-filebar">{collapsed && <button title="Show explorer" aria-label="Show explorer" onClick={() => setCollapsed(false)}><PanelLeftOpen size={16} /></button>}<div className="qe-filepath" title={path || workspace?.root}>{path ? <><FileIcon name={path} /><span>{path}</span>{dirty && <span className="qe-dirty" aria-label="Unsaved changes" />}</> : <span>Browse · read · copy · edit</span>}</div>{document && <div className="qe-modes" role="group" aria-label="File mode"><button aria-pressed={!editing} className={!editing ? 'is-active' : ''} onClick={() => setEditing(false)}>{markdown ? 'Preview' : 'View'}</button><button aria-pressed={editing} className={editing ? 'is-active' : ''} disabled={!writable || saving} title={!writable ? 'Read-only or mixed line endings' : 'Enable editing'} onClick={() => { setSurfaceOpened(true); setEditing(true); }}><Pencil size={12} />Edit</button></div>}</div>
-        {document && <div className="qe-toolbar"><div className="qe-toolbar-group">{markdown && !editing ? <label ref={outlineSearch} className="qe-preview-search"><Search size={14} /><input aria-label="Find Markdown heading" placeholder="Find a heading…" value={previewSearch} onChange={event => { setPreviewSearch(event.target.value); setOutlineOpen(true); }} /></label> : <><button title="Find / replace (Ctrl+F / Ctrl+H)" aria-label="Find / replace" onClick={() => editor.current?.find()}><Search size={15} /></button><button title="Go to line" aria-label="Go to line" onClick={() => editor.current?.goToLine()}><ChevronsUpDown size={15} /></button></>}<button ref={outlineTrigger} aria-expanded={outlineOpen} title="Best-effort section outline" onClick={() => setOutlineOpen(!outlineOpen)}><ListTree size={15} /><span>Sections</span></button>{editing && <><button title="Undo (Ctrl+Z)" aria-label="Undo" disabled={saving} onClick={() => editor.current?.undo()}><RotateCcw size={14} /></button><button title="Redo (Ctrl+Y)" aria-label="Redo" disabled={saving} onClick={() => editor.current?.redo()}><RotateCw size={14} /></button></>}</div><div className="qe-toolbar-group"><button disabled={saving || loading || lease === undefined} onClick={() => setHistoryOpen(true)}>History</button><details ref={copyMenu} className="qe-copy-menu" open={copyOpen}><summary ref={copyTrigger} aria-expanded={copyOpen} onClick={event => { event.preventDefault(); setCopyOpen(value => !value); }}><Copy size={14} /><span>Copy</span><ChevronDown size={12} /></summary><div role="group" aria-label="Copy actions" onClickCapture={event => { if (event.target instanceof Element) { const button = event.target.closest<HTMLButtonElement>('button'); if (button && !button.disabled) { setCopyOpen(false); copyTrigger.current?.focus({ preventScroll: true }); } } }}><button onClick={() => void copy(dirty ? diskText(text, document) : document.content, 'Raw file copied')}><FileText size={14} />Entire file · raw text</button><button onClick={() => void copy(path, 'Relative path copied')}><Clipboard size={14} />Relative path</button><button disabled={(markdown && !editing) || !selection.selected} onClick={() => copySlice('selection')}><Copy size={14} />Selected code</button><button disabled={markdown && !editing} onClick={() => copySlice('lines')}><Code2 size={14} />Current line / line range</button><button disabled={markdown && !editing} title="Enclosing foldable section, or surrounding nonblank block" onClick={() => copySlice('section')}><Braces size={14} />Current code section</button></div></details><button className="qe-ai" title="Copy selection, or entire file when nothing is selected, with path and line numbers" onClick={() => copySlice(selection.selected && (!markdown || editing) ? 'selection' : 'all', true)}><Sparkles size={14} /><span>Copy for AI</span></button>{editing && <button className="qe-save" title="Save (Ctrl+S)" disabled={!dirty || saving || !writable || lease === undefined} onClick={() => void save()}>{saving ? <Loader2 size={14} className="qe-spin" /> : <Save size={14} />}<span>Save</span></button>}<button title="Reload disk version" aria-label="Reload disk version" disabled={saving || loading} onClick={() => { const action = () => void openFile(path, true); if (dirty) setConfirm({ description: `Discard unsaved edits in ${path} and reload its disk version?`, action }); else action(); }}><RefreshCw size={14} /></button></div></div>}
+        {document && <div className="qe-toolbar"><div className="qe-toolbar-group">{markdown && !editing ? <label ref={outlineSearch} className="qe-preview-search"><Search size={14} /><input aria-label="Find Markdown heading" placeholder="Find a heading…" value={previewSearch} onChange={event => { setPreviewSearch(event.target.value); setOutlineOpen(true); }} /></label> : <><button title="Find / replace (Ctrl+F / Ctrl+H)" aria-label="Find / replace" onClick={() => editor.current?.find()}><Search size={15} /></button><button title="Go to line" aria-label="Go to line" onClick={() => editor.current?.goToLine()}><ChevronsUpDown size={15} /></button></>}<button title="Toggle word wrap" disabled={!surfaceOpened} onClick={() => editor.current?.toggleWrap()}>Wrap</button><button ref={outlineTrigger} aria-expanded={outlineOpen} title="Best-effort section outline" onClick={() => setOutlineOpen(!outlineOpen)}><ListTree size={15} /><span>Sections</span></button>{editing && <><button title="Undo (Ctrl+Z)" aria-label="Undo" disabled={saving} onClick={() => editor.current?.undo()}><RotateCcw size={14} /></button><button title="Redo (Ctrl+Y)" aria-label="Redo" disabled={saving} onClick={() => editor.current?.redo()}><RotateCw size={14} /></button></>}</div><div className="qe-toolbar-group"><button aria-haspopup="menu" disabled={saving || loading || lease === undefined} onClick={event => showMenu(event)}>Edit<ChevronDown size={12} /></button><button disabled={saving || loading || lease === undefined} onClick={() => setHistoryOpen(true)}>History</button><details ref={copyMenu} className="qe-copy-menu" open={copyOpen}><summary ref={copyTrigger} aria-expanded={copyOpen} onClick={event => { event.preventDefault(); setCopyOpen(value => !value); }}><Copy size={14} /><span>Copy</span><ChevronDown size={12} /></summary><div role="group" aria-label="Copy actions" onClick={event => { if (event.target instanceof Element) { const button = event.target.closest<HTMLButtonElement>('button'); if (button && !button.disabled) setCopyOpen(false); } }}><button onClick={() => void copy(dirty ? diskText(text, document) : document.content, 'Raw file copied')}><FileText size={14} />Entire file · raw text</button><button onClick={() => void copy(path, 'Relative path copied')}><Clipboard size={14} />Relative path</button><button disabled={(markdown && !editing) || !selection.selected} onClick={() => copySlice('selection')}><Copy size={14} />Selected code</button><button disabled={markdown && !editing} onClick={() => copySlice('lines')}><Code2 size={14} />Current line / line range</button><button disabled={markdown && !editing} title="Enclosing foldable section, or surrounding nonblank block" onClick={() => copySlice('section')}><Braces size={14} />Current code section</button></div></details><select aria-label="Copy for AI scope" value={copyScope} onChange={e => setCopyScope(e.target.value as typeof copyScope)}><option value="selection" disabled={!selection.selected}>Selected Code</option><option value="section">Current Function / Section</option><option value="all">Current File</option></select><select aria-label="Approximate AI context byte budget, not tokens" value={copyCustom ? 'custom' : copyBudget} onChange={e => { setCopyCustom(e.target.value === 'custom'); if (e.target.value !== 'custom') setCopyBudget(Number(e.target.value)); }}><option value="4096">Small · 4 KB</option><option value="16384">Standard · 16 KB</option><option value="49152">Large · 48 KB</option><option value="custom">Custom</option></select>{copyCustom && <input aria-label="Custom context budget in bytes" type="number" min="1024" max="196608" value={copyBudget} onChange={e => setCopyBudget(Math.max(1024, Math.min(196608, Number(e.target.value) || 16384)))} />}<button className="qe-ai" title="Copy selection, or entire file when nothing is selected, with path and line numbers" onClick={() => copySlice(copyScope, true)}><Sparkles size={14} /><span>Copy for AI</span></button>{editing && <button className="qe-save" title="Save (Ctrl+S)" disabled={!dirty || saving || !writable || lease === undefined} onClick={() => void save()}>{saving ? <Loader2 size={14} className="qe-spin" /> : <Save size={14} />}<span>Save</span></button>}<button title="Reload disk version" aria-label="Reload disk version" disabled={saving || loading} onClick={() => { const action = () => void openFile(path, true); if (dirty) setConfirm({ description: `Discard unsaved edits in ${path} and reload its disk version?`, action }); else action(); }}><RefreshCw size={14} /></button></div></div>}
         {outlineOpen && document && <div ref={outline} className="qe-outline" aria-label="Section navigation"><div><span>SECTIONS · BEST EFFORT</span><button aria-label="Close sections" onClick={() => setOutlineOpen(false)}><X size={13} /></button></div>{sections.filter(s => s.label.toLowerCase().includes(previewSearch.toLowerCase())).map(s => <button key={s.line} onClick={() => jump(s.line, sections.indexOf(s))}><span>{s.label}</span><small>{s.line}</small></button>)}{!sections.length && <p>No named sections found. Use search or go to line.</p>}</div>}
         <OperationNotice message={error} dismiss={() => setError('')} />
         {loading && document && <div className="qe-opening" role="status"><Loader2 className="qe-spin" size={13} />Opening file…</div>}
         {loading && !document ? <div className="qe-empty" role="status"><Loader2 className="qe-spin" size={24} /><strong>Opening file…</strong><span>Reading a single file from your project.</span></div> : !document ? <div className="qe-empty"><span className="qe-empty-symbol"><Code2 size={27} strokeWidth={1.4} /></span><strong>A little space for focused work.</strong><span>Choose a file to read, copy context for AI,<br />or make a careful edit.</span><div><kbd>View first</kbd><ChevronRight size={12} /><kbd>Edit when ready</kbd></div></div> : <>
           {markdown && !editing && <div className="qe-preview" ref={preview}><Preview text={text} copy={(value, message) => void copy(value, message)} /></div>}
-          {surfaceOpened && <div className="qe-surface" hidden={markdown && !editing}><Suspense fallback={<div className="qe-empty" role="status"><Loader2 className="qe-spin" size={20} />Loading editor…</div>}><EditorSurface key={`${workspace?.id}:${path}:${loadedVersion}`} ref={editor} content={text} path={path} line={logJump && logJump.projectId === workspace?.id && tabKey(logJump.path) === tabKey(path) ? logJump.line : undefined} editing={editing && !closing && !saving && !loading && !transferring && !working && !naming} onChange={setText} onSelection={(from, to, selected) => setSelection({ from, to, selected })} onSave={() => void latestSave.current()} onContextMenu={event => showMenu(event)} /></Suspense></div>}
+          {surfaceOpened && <div className="qe-surface" hidden={markdown && !editing}><Suspense fallback={<div className="qe-empty" role="status"><Loader2 className="qe-spin" size={20} />Loading editor…</div>}><EditorSurface key={`${workspace?.id}:${path}:${loadedVersion}`} ref={editor} content={text} path={path} line={logJump && logJump.projectId === workspace?.id && tabKey(logJump.path) === tabKey(path) ? logJump.line : undefined} editing={editing && !closing && !saving && !loading && !transferring && !working && !naming && !smart && !pasting} onChange={setText} onSelection={(from, to, selected) => setSelection({ from, to, selected })} onSave={() => void latestSave.current()} onContextMenu={event => showMenu(event)} /></Suspense></div>}
         </>}
         <footer className="qe-status"><span role="status">{notice ? <><Check size={12} />{notice}</> : <>{dirty ? '● Unsaved changes' : editing ? 'Editing' : markdown && document ? 'Markdown preview' : 'Read-only view'}{document && <> · {extension(path).toUpperCase() || 'TEXT'}</>}</>}</span><span>{document && <>{markdown && !editing ? `${text.split('\n').length} lines` : `Ln ${selection.from}${selection.to !== selection.from ? `–${selection.to}` : ''}`}<span className="qe-status-detail"> · UTF-8{document.content.startsWith('\uFEFF') ? ' BOM' : ''} · {document.lineEnding}</span></>}{backup && <span title="Previous disk version stored in DevFlow local file history" className="qe-recovery"> · Local snapshot saved</span>}</span></footer>
       </div>
+      {<>
+        <div hidden={!aiOpen} className="qe-divider qe-ai-divider" role="separator" tabIndex={0} aria-label="Resize AI assistant panel; double-click to reset" aria-orientation="vertical" aria-valuemin={260} aria-valuemax={550} aria-valuenow={aiWidth} onDoubleClick={() => setAiWidth(340)} onKeyDown={event => { if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') { event.preventDefault(); setAiWidth(value => Math.max(260, Math.min(550, value + (event.key === 'ArrowLeft' ? 10 : -10)))); } if (event.key === 'Home') setAiWidth(340); }} onPointerDown={event => { event.currentTarget.setPointerCapture(event.pointerId); }} onPointerMove={event => { if (event.currentTarget.hasPointerCapture(event.pointerId)) { const rect = container.current?.getBoundingClientRect(); const right = rect?.right || window.innerWidth; const available = container.current?.clientWidth || 800; const explorerSpace = collapsed ? 0 : width; setAiWidth(clampAiWidth(right - event.clientX, available, explorerSpace)); } }} onPointerUp={event => { if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId); }} />
+        <div style={{ display: aiOpen ? 'contents' : 'none' }}><AiAssistantPanel onFlushReady={flush => { flushAi.current = flush; }} initialMessages={aiMessages.current} initialReviewed={aiReviewed.current} onMessagesChange={value => { aiMessages.current = value; }} onStreamingChange={value => { aiStreaming.current = value; }} onReviewedChange={value => { aiReviewed.current = value; }} key={`${workspace?.id}:${workspace?.root}:${lease}`} projectRoot={workspace?.root || ''} editorLease={lease} onOpenReference={(path, line) => { if (workspace) setPendingLocation({ projectId: workspace.id, path, line }); }} onClose={() => setAiOpen(false)} projectId={workspace?.id || ''} attachments={aiAttachments} onAttachmentsChange={updateAiAttachments} onAttachCurrentFile={attachCurrentFile} canAttachCurrentFile={!!document && !!path && !loading && !saving && !working} onAttachSelectedCode={attachSelectedCode} canAttachSelectedCode={!!document && selection.selected && surfaceOpened && !loading && !saving && !working} onAttachSelectedLogs={() => attachLogs(checkedLogEntries, `Selected logs · ${checkedLogEntries.length} entries`)} canAttachSelectedLogs={checkedLogEntries.some(entry => entry.projectId === workspace?.id)} onAttachProjectContext={attachProjectContext} canAttachProjectContext={!!workspace && !loading && !working} provider={aiProvider} onProviderChange={setAiProvider} model={aiModel} onModelChange={setAiModel} draft={aiDraft} onDraftChange={setAiDraft} onCopyNotice={msg => setNotice(msg)} /></div>
+      </>}
     </div>
     {pendingLogs.length > 0 && !pendingLogs.includes(workspace?.id || '') && <p role="status">Logs are waiting to dock. Select their project in Quick Editor; unsaved files remain protected.</p>}
     {logsOpen && workspace && <>
@@ -421,11 +696,13 @@ export default function QuickEditor({ projects, selected, initial, floating = fa
         onPointerDown={event => event.currentTarget.setPointerCapture(event.pointerId)} onPointerMove={event => { if (event.currentTarget.hasPointerCapture(event.pointerId)) { const rect = layout.current?.getBoundingClientRect(); if (rect) setLogsHeight(Math.max(180, Math.min(Math.floor(rect.height * .65), rect.bottom - event.clientY))); } }} onPointerUp={event => { if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId); }} />
       <section id="qe-service-logs" className={`qe-bottom-logs ${logsCollapsed ? 'is-collapsed' : ''}`} aria-label="Project logs" style={{ '--logs-height': `${logsHeight}px` } as React.CSSProperties} onContextMenu={event => event.stopPropagation()}>
         <LogsHeader project={workspace} onFloat={() => void floatLogs(workspace).then(() => { setLogsOpen(false); setError(''); }).catch(cause => setError(errorMessage(cause)))} collapsed={logsCollapsed} onCollapse={() => setLogsCollapsed(value => !value)} onHide={() => setLogsOpen(false)} />
-        <div className="qe-logs-content" hidden={logsCollapsed}>{visible && <ProjectLogs key={workspace.id} project={workspace} />}</div>
+        <div className="qe-logs-content" hidden={logsCollapsed}>{visible && <ProjectLogs key={workspace.id} project={workspace} onAttachLogs={attachLogs} onCheckedLogsChange={setCheckedLogEntries} />}</div>
       </section>
     </>}
     </div>
     </fieldset>
+    {pasting && workspace && lease !== undefined && <PasteAsNewFile project={workspace} blocks={pasting.blocks} folder={pasting.folder} lease={lease} create={createPastedFiles} open={openFile} close={() => setPasting(undefined)} />}
+    {smart && workspace && <SmartReplace project={workspace} blocks={smart.blocks} currentPath={path} selection={smart.selection} openPaths={tabs.map(tab => tab.path)} load={loadSmartTarget} search={searchSmartTargets} apply={applySmartReplace} close={() => setSmart(undefined)} />}
     {historyOpen && workspace && document && <EditorHistory project={workspace} path={path} dirty={dirty} close={() => setHistoryOpen(false)} restore={async (id, expected) => {
       if (closeLock.current || saveLock.current || workLock.current || transferLock.current || lease === undefined) throw new Error('Wait for the current editor operation to finish.');
       if (tabsRef.current.some(tab => tabKey(tab.path) === tabKey(path) && tabDirty(tab))) throw new Error('Unsaved edits are protected. Save or discard them before restoring.');
@@ -442,7 +719,7 @@ export default function QuickEditor({ projects, selected, initial, floating = fa
     {working && <p role="status" className="qe-copy-warning">Working locally…</p>}
     {!!copyWarnings.length && <div className="qe-copy-warning" role="status"><strong>Copy was filtered or incomplete.</strong>{copyWarnings.map(warning => <div key={warning}>{warning}</div>)}<button onClick={() => setCopyWarnings([])}>Dismiss</button></div>}
     {menu && <EditorContextMenu x={menu.x} y={menu.y} actions={menuActions()} close={() => setMenu(undefined)} />}
-    {naming && <EditorNameDialog title={naming.action === 'rename' ? `Rename ${naming.entry.name}` : naming.action === 'file' ? 'New File' : 'New Folder'} initial={naming.action === 'rename' ? naming.entry.name : ''} busy={working} error={nameError} submit={name => void applyName(name)} close={() => { setNaming(undefined); setNameError(''); }} />}
+    {naming && <EditorNameDialog destination={naming.entry.path} title={naming.action === 'rename' ? `Rename ${naming.entry.name}` : naming.action === 'file' ? 'New File' : 'New Folder'} initial={naming.action === 'rename' ? naming.entry.name : ''} busy={working} error={nameError} submit={(name, createParents) => void applyName(name, createParents)} close={() => { setNaming(undefined); setNameError(''); }} />}
     {confirm && createPortal(<ConfirmDialog title="Unsaved file changes" description={confirm.description} confirmText="Discard and continue" destructive onCancel={() => { confirm.cancel?.(); setConfirm(undefined); }} onConfirm={() => { const action = confirm.action; setConfirm(undefined); action(); }} />, window.document.body)}
   </section>;
 }

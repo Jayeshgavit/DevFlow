@@ -1,14 +1,18 @@
+import { readEditorPreferences, saveEditorPreferences } from './editor-preferences';
 import React, { forwardRef, useEffect, useImperativeHandle, useRef } from 'react';
-import { Compartment, EditorState } from '@codemirror/state';
-import { EditorView, drawSelection, highlightActiveLine, highlightActiveLineGutter, keymap, lineNumbers } from '@codemirror/view';
+import { Compartment, EditorState, type Range } from '@codemirror/state';
+import { EditorView, Decoration, ViewPlugin, drawSelection, highlightActiveLine, highlightActiveLineGutter, keymap, lineNumbers } from '@codemirror/view';
 import { defaultKeymap, history, historyKeymap, indentWithTab, undo, redo, selectAll } from '@codemirror/commands';
-import { bracketMatching, defaultHighlightStyle, foldGutter, foldKeymap, foldable, indentOnInput, syntaxHighlighting, syntaxTree, HighlightStyle } from '@codemirror/language';
+import { indentUnit, bracketMatching, defaultHighlightStyle, foldGutter, foldKeymap, foldable, indentOnInput, syntaxHighlighting, syntaxTree, HighlightStyle } from '@codemirror/language';
 import { search, searchKeymap, openSearchPanel, closeSearchPanel, gotoLine } from '@codemirror/search';
 import { tags } from '@lezer/highlight';
 import { extension, type CodeSlice } from './editor-api';
 
 export type EditorHandle = {
+  selectionRange: () => { from: number; to: number } | undefined;
+  replaceRange: (expected: string, from: number, to: number, insertion: string) => boolean;
   slice: (kind: 'selection' | 'lines' | 'section' | 'all') => CodeSlice;
+  toggleWrap: () => void;
   find: () => void; goToLine: () => void; undo: () => void; redo: () => void;
   jump: (line: number) => void;
   clipboard: (action: 'cut' | 'copy' | 'paste') => Promise<void>;
@@ -46,11 +50,33 @@ const highlighting = HighlightStyle.define([
   { tag: tags.link, color: 'var(--accent-strong)', textDecoration: 'underline' },
 ]);
 
+// Surface parser-reported syntax errors without introducing a second parser or
+// changing the document. Lezer parsing is incremental and already used here.
+const syntaxDiagnostics = ViewPlugin.fromClass(class {
+  decorations = Decoration.none;
+  constructor(view: EditorView) { this.updateDiagnostics(view); }
+  update(update: import('@codemirror/view').ViewUpdate) {
+    if (update.docChanged || update.viewportChanged || update.geometryChanged) this.updateDiagnostics(update.view);
+  }
+  updateDiagnostics(view: EditorView) {
+    const marks: Range<Decoration>[] = [];
+    const tree = syntaxTree(view.state);
+    tree.iterate({ enter(node) {
+      if (!node.type.isError || node.to <= node.from) return;
+      marks.push(Decoration.mark({ class: 'cm-syntax-error', attributes: { title: 'Syntax error reported by the language parser' } }).range(node.from, node.to));
+    } });
+    this.decorations = Decoration.set(marks, true);
+  }
+}, { decorations: value => value.decorations });
+
 export default forwardRef<EditorHandle, Props>(function EditorSurface(props, ref) {
   const host = useRef<HTMLDivElement>(null);
   const editor = useRef<EditorView>();
   const callbacks = useRef(props); callbacks.current = props;
   const editable = useRef(new Compartment());
+  const wrapping = useRef(new Compartment());
+  const wrapped = useRef(false);
+  const preferences = useRef(new Compartment());
   useEffect(() => {
     if (!host.current) return;
     let disposed = false;
@@ -58,8 +84,8 @@ export default forwardRef<EditorHandle, Props>(function EditorSurface(props, ref
     const view = new EditorView({ parent: host.current, state: EditorState.create({
       doc: props.content,
       extensions: [
-        lineNumbers(), foldGutter(), drawSelection(), highlightActiveLine(), highlightActiveLineGutter(),
-        history(), indentOnInput(), bracketMatching(), search(), syntaxHighlighting(defaultHighlightStyle, { fallback: true }), syntaxHighlighting(highlighting),
+        wrapping.current.of([]), preferences.current.of([]), syntaxDiagnostics, foldGutter(), drawSelection(),
+        history(), indentOnInput(), search(), syntaxHighlighting(defaultHighlightStyle, { fallback: true }), syntaxHighlighting(highlighting),
         editable.current.of([EditorState.readOnly.of(!props.editing)]), languages.of([]),
         EditorView.contentAttributes.of({ 'aria-label': 'File contents', spellcheck: 'false' }),
         keymap.of([{ key: 'Mod-s', run: () => { callbacks.current.onSave(); return true; } }, { key: 'Mod-h', run: openSearchPanel }, ...searchKeymap, ...foldKeymap, ...historyKeymap, ...defaultKeymap, indentWithTab]),
@@ -77,6 +103,20 @@ export default forwardRef<EditorHandle, Props>(function EditorSurface(props, ref
     return () => { disposed = true; editor.current = undefined; view.destroy(); };
   }, []);
   useEffect(() => {
+    const apply = () => {
+      const view = editor.current; if (!view) return;
+      const p = readEditorPreferences();
+      wrapped.current = p.wrap === 'on' || (p.wrap === 'remember' && p.lastWrap);
+      view.dispatch({ effects: [wrapping.current.reconfigure(wrapped.current ? EditorView.lineWrapping : []), preferences.current.reconfigure([
+        EditorState.tabSize.of(p.tabSize), indentUnit.of(p.spaces ? ' '.repeat(p.tabSize) : '\t'),
+        p.lineNumbers ? lineNumbers() : [], p.activeLine ? [highlightActiveLine(), highlightActiveLineGutter()] : [], p.brackets ? bracketMatching() : [],
+        EditorView.theme({ '&': { fontSize: `${p.fontSize}px` }, '.cm-content': { lineHeight: String(p.lineHeight) } }),
+      ])] });
+    };
+    apply(); window.addEventListener('storage', apply); window.addEventListener('devflow-editor-preferences', apply);
+    return () => { window.removeEventListener('storage', apply); window.removeEventListener('devflow-editor-preferences', apply); };
+  }, []);
+  useEffect(() => {
     if (!editor.current) return;
     closeSearchPanel(editor.current);
     editor.current.dispatch({ effects: editable.current.reconfigure(EditorState.readOnly.of(!props.editing)) });
@@ -89,6 +129,14 @@ export default forwardRef<EditorHandle, Props>(function EditorSurface(props, ref
     view.dispatch({ selection: { anchor: at }, effects: EditorView.scrollIntoView(at, { y: 'start' }) }); view.focus();
   }, [props.line]);
   useImperativeHandle(ref, () => ({
+    selectionRange: () => { const range = editor.current?.state.selection.main; return range && !range.empty ? { from: range.from, to: range.to } : undefined; },
+    replaceRange: (expected, from, to, insert) => {
+      const view = editor.current;
+      if (!view || view.state.doc.toString() !== expected || from < 0 || to < from || to > view.state.doc.length) return false;
+      view.dispatch({ changes: { from, to, insert }, userEvent: 'input.paste', scrollIntoView: true });
+      return true;
+    },
+    toggleWrap: () => { const view = editor.current; if (!view) return; const p = readEditorPreferences(); if (p.wrap !== 'remember') return; wrapped.current = !wrapped.current; try { saveEditorPreferences({ ...p, lastWrap: wrapped.current }); } catch { /* Keep session wrap available. */ } view.dispatch({ effects: wrapping.current.reconfigure(wrapped.current ? EditorView.lineWrapping : []) }); },
     selectAll: () => { if (editor.current) { selectAll(editor.current); editor.current.focus(); } },
     clipboard: async action => {
       const view = editor.current; if (!view) return;

@@ -21,14 +21,15 @@ use windows_sys::Win32::{
     },
 };
 
-pub(crate) struct WindowsJob(OwnedHandle);
+pub(crate) struct WindowsJob(OwnedHandle, u64);
 
 impl WindowsJob {
     fn new() -> io::Result<Self> {
         // No name or inheritable handle: only DevFlow owns this service's job.
         let handle = unsafe { CreateJobObjectW(ptr::null(), ptr::null()) };
         if handle.is_null() { return Err(io::Error::last_os_error()); }
-        let job = Self(unsafe { OwnedHandle::from_raw_handle(handle) });
+        static NEXT_RUN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        let job = Self(unsafe { OwnedHandle::from_raw_handle(handle) }, NEXT_RUN.fetch_add(1, std::sync::atomic::Ordering::Relaxed));
         let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
         limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
         let ok = unsafe {
@@ -40,6 +41,15 @@ impl WindowsJob {
     }
 
     fn handle(&self) -> HANDLE { self.0.as_raw_handle() }
+    pub(crate) fn run_token(&self) -> String { self.1.to_string() }
+
+    pub(crate) fn contains(&self, process: HANDLE) -> io::Result<bool> {
+        let mut member = 0;
+        if unsafe { windows_sys::Win32::System::JobObjects::IsProcessInJob(process, self.handle(), &mut member) } == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(member != 0)
+    }
 
     fn assign_suspended(&self, pid: u32) -> io::Result<()> {
         // The child is still suspended, and its Child handle prevents PID reuse.

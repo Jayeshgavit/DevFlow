@@ -16,6 +16,14 @@ mod service_output;
 mod system_center;
 #[cfg(windows)]
 mod windows_job;
+mod ai_credentials;
+mod ai_chat;
+mod chat_history;
+mod ai_model_check;
+mod ai_provider;
+mod api_tester;
+mod developer_environment;
+mod port_manager;
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -491,9 +499,11 @@ fn discover_services(root: String) -> Result<Vec<Service>, String> {
 #[tauri::command]
 fn suggest_service(root: String, project_root: String, framework: String) -> Result<Option<Service>, String> {
  let dir = std::fs::canonicalize(&root).map_err(|e| format!("Working directory is unavailable: {e}"))?;
+ std::fs::read_dir(&dir).map_err(|e| format!("Working directory cannot be read: {e}"))?;
  let project = std::fs::canonicalize(&project_root).map_err(|e| format!("Project root is unavailable: {e}"))?;
  if !dir.is_dir() || !project.is_dir() { return Err("Select valid project and service directories".into()); }
  Ok(match framework.as_str() {
+  "Auto" => suggested_service(&dir, &dir, "suggested", "Suggested service"),
   "FastAPI" | "Flask" | "Django" => python_service(&dir, &project, "suggested", "Suggested service", Some(&framework)),
   "Next.js" | "Vite/React" | "Node.js" => node_service(&dir, "suggested", "Suggested service"),
   "Rust/Cargo" => cargo_service(&dir, "suggested", "Suggested service"),
@@ -771,9 +781,21 @@ async fn stop_service(state: State<'_, AppState>, project_id: String, service_id
  stop_owned_service(&state, &key).await
 }
 async fn stop_owned_service(state: &AppState, key: &str) -> Result<(), String> {
+ stop_owned_service_checked(state, key, None).await
+}
+async fn stop_owned_service_checked(state: &AppState, key: &str, expected_run: Option<&str>) -> Result<(), String> {
  enum StopTarget { Starting(tokio::sync::watch::Receiver<bool>), Running(Running, bool) }
  let target = {
   let mut processes = state.processes.lock().map_err(|_| "State unavailable")?;
+  if let Some(expected) = expected_run {
+   #[cfg(windows)]
+   match processes.get(key) {
+    Some(ProcessEntry::Running(run)) if run.job.run_token() == expected => {},
+    _ => return Err("Service run changed or stopped. Refresh Port Manager before stopping.".into()),
+   }
+   #[cfg(not(windows))]
+   { let _ = expected; return Err("Port Manager requires Windows".into()); }
+  }
   match processes.get(key) {
    Some(ProcessEntry::Starting(starting)) => {
     starting.cancelled.store(true, Ordering::SeqCst);
@@ -883,6 +905,50 @@ async fn shutdown_app(app: tauri::AppHandle, window: tauri::WebviewWindow, confi
  app.exit(0);
  Ok(())
 }
+#[tauri::command]
+async fn ai_set_api_key(provider: String, key: String) -> Result<(), String> {
+    ai_credentials::set_api_key(&provider, &key)
+}
+
+#[tauri::command]
+async fn ai_delete_api_key(provider: String) -> Result<(), String> {
+    ai_credentials::delete_api_key(&provider)
+}
+
+#[tauri::command]
+async fn ai_get_credential_status(provider: String) -> Result<ai_credentials::CredentialStatus, String> {
+    ai_credentials::get_credential_status(&provider)
+}
+
+#[tauri::command]
+async fn ai_test_connection(provider: String) -> Result<ai_credentials::TestConnectionResult, String> {
+    ai_chat::test_provider_connection(&provider).await
+}
+
+#[tauri::command]
+async fn ai_list_models(provider: String) -> Result<Vec<ai_chat::AiModelInfo>, String> {
+    ai_chat::list_models(&provider).await
+}
+
+#[tauri::command]
+async fn ai_start_chat(
+    app: tauri::AppHandle,
+    state: State<'_, ai_chat::AiChatState>,
+    window: tauri::WebviewWindow,
+    request: ai_chat::StartChatRequest,
+) -> Result<(), String> {
+    ai_chat::start_chat_stream(app, &state, window.label(), request).await
+}
+
+#[tauri::command]
+async fn ai_stop_chat(
+    state: State<'_, ai_chat::AiChatState>,
+    window: tauri::WebviewWindow,
+    request_id: String,
+) -> Result<bool, String> {
+    Ok(state.cancel(&format!("{}:{request_id}", window.label())).await)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
  tauri::Builder::default().plugin(tauri_plugin_dialog::init()).plugin(tauri_plugin_notification::init()).manage(AppState::default())
@@ -890,7 +956,18 @@ pub fn run() {
  .manage(quick_editor::QuickEditor::default())
  .manage(editor_window::EditorWindow::default())
  .manage(logs_window::LogsWindows::default())
+  .manage(ai_chat::AiChatState::new())
+ .manage(quick_editor::research::ResearchState::default())
+ .manage(api_tester::ApiTester::default())
  .on_window_event(|window, event| {
+  if window.label() == "main" {
+   if matches!(event, tauri::WindowEvent::Destroyed) { window.state::<api_tester::ApiTester>().shutdown(); }
+   if matches!(event, tauri::WindowEvent::CloseRequested { .. }) {
+    window.state::<api_tester::ApiTester>().cancel_all();
+    let _ = window.app_handle().emit_to("main", "api-tester-closing", ());
+   }
+  }
+  if matches!(event, tauri::WindowEvent::Destroyed) { window.state::<quick_editor::research::ResearchState>().clear(window.label(), None); }
   if window.label() == "main" {
    if let tauri::WindowEvent::CloseRequested { api, .. } = event {
     api.prevent_close();
@@ -904,14 +981,16 @@ pub fn run() {
  })
  .setup(|app| { notifications::initialize(app.handle())?; Ok(()) })
  .manage(system_center::SystemCenter::default())
- .invoke_handler(tauri::generate_handler![quick_editor::snapshots::editor_history, quick_editor::snapshots::editor_snapshot, quick_editor::snapshots::editor_restore, quick_editor::actions::editor_export, quick_editor::actions::editor_mutate, quick_editor::actions::editor_reveal, editor_window::editor_writer_lease, editor_window::editor_window_session, editor_window::editor_float, editor_window::editor_window_ready, editor_window::editor_dock, editor_window::editor_accept_dock, editor_window::editor_recover_opening, quick_editor::editor_list, quick_editor::editor_read, quick_editor::editor_save, notifications::show_desktop_notification, load_projects, save_projects, detect_project, discover_services, suggest_service, check_service_health, start_service, stop_service, running_services, stopping_services, open_directory, open_in_ai_cli,
+ .invoke_handler(tauri::generate_handler![port_manager::inspect_ports, port_manager::stop_port_service, developer_environment::check_tool, developer_environment::check_project_requirements, api_tester::api_tester_source, api_tester::api_tester_prepare, api_tester::api_tester_send, api_tester::api_tester_cancel, api_tester::api_tester_load, api_tester::api_tester_save, chat_history::chat_storage_location, chat_history::chat_storage_pick, chat_history::chat_storage_apply, chat_history::chat_history_export, chat_history::chat_history_load, chat_history::chat_history_save, quick_editor::snapshots::editor_history, quick_editor::snapshots::editor_snapshot, quick_editor::snapshots::editor_restore, quick_editor::actions::editor_export, quick_editor::actions::editor_mutate, quick_editor::paste_new::editor_create_files, quick_editor::actions::editor_reveal, editor_window::editor_writer_lease, editor_window::editor_window_session, editor_window::editor_float, editor_window::editor_window_ready, editor_window::editor_dock, editor_window::editor_accept_dock, editor_window::editor_recover_opening, quick_editor::editor_list, quick_editor::editor_read, quick_editor::editor_save, notifications::show_desktop_notification, load_projects, save_projects, detect_project, discover_services, suggest_service, check_service_health, start_service, stop_service, running_services, stopping_services, open_directory, open_in_ai_cli,
   managed_service_count, shutdown_app, editor_window::editor_close,
   logs_window::logs_float, logs_window::logs_project, logs_window::logs_dock, logs_window::logs_pending, logs_window::logs_accept_dock,
   log_actions::logs_copy, log_actions::logs_export, log_actions::logs_verify_location, log_actions::logs_open_location, log_actions::logs_take_location,
   system_center::system_snapshot, system_center::system_end_task, system_center::scan_temp_files, system_center::clean_temp_files, system_center::scan_cleanup, system_center::clean_selected_cleanup,
-  system_center::cancel_system_maintenance, system_center::flush_dns_cache, system_center::open_storage_tool, system_center::open_local_url])
+  system_center::cancel_system_maintenance, system_center::flush_dns_cache, system_center::open_storage_tool, system_center::open_local_url,
+   ai_model_check::ai_check_model, quick_editor::research::ai_research_context, quick_editor::research::ai_clear_research_context, ai_set_api_key, ai_delete_api_key, ai_get_credential_status, ai_test_connection, ai_list_models, ai_start_chat, ai_stop_chat])
  .build(tauri::generate_context!()).expect("error while building DevFlow")
  .run(|app, event| {
+  if let tauri::RunEvent::Exit = event { app.state::<api_tester::ApiTester>().shutdown(); }
   #[cfg(windows)]
   if let tauri::RunEvent::Exit = event { app.state::<AppState>().shutdown_jobs(); }
   #[cfg(not(windows))]
@@ -938,7 +1017,7 @@ mod detection_tests {
    let detected = detect_project(root.to_string_lossy().to_string()).unwrap();
    assert_eq!(detected.services.iter().map(|service| service.id.as_str()).collect::<Vec<_>>(), ["backend", "portal"]);
    let backend = detected.services.iter().find(|service| service.id == "backend").unwrap();
-   assert_eq!(backend.program, interpreter.to_string_lossy());
+   assert!(backend.program.ends_with(if cfg!(windows) { r".venv\Scripts\python.exe" } else { ".venv/bin/python" }));
    assert_eq!(backend.args, ["-m", "uvicorn", "main:app", "--reload", "--host", "127.0.0.1", "--port", "8000"]);
    assert_eq!(backend.host.as_deref(), Some("127.0.0.1"));
    assert_eq!(backend.port, Some(8000));

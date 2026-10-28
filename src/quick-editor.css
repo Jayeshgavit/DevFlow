@@ -76,6 +76,8 @@
 .qe-toolbar-group { display:flex; align-items:center; gap:2px; min-width:0; }
 .qe-toolbar-group:last-child { margin-left:auto; }
 .qe-toolbar .qe-ai { color:var(--accent-strong); background:var(--sidebar-active); border:1px solid var(--border-soft); margin-left:4px; }
+.qe-toolbar .qe-ai-assistant-toggle { color:var(--accent-strong); margin-left:3px; }
+.qe-toolbar .qe-ai-assistant-toggle.is-active { background:var(--sidebar-active); color:var(--text); border-color:var(--border-soft); }
 .qe-toolbar .qe-save { color:var(--success); margin-left:3px; }
 .qe-copy-menu { position:relative; font-size:11px; }
 .qe-copy-menu>summary { display:flex; align-items:center; gap:5px; padding:6px 7px; cursor:pointer; border-radius:5px; list-style:none; color:var(--text-muted); }
@@ -118,7 +120,9 @@
 .qe-code .cm-cursor { border-left-color:var(--text); }
 .qe-code .cm-editor.cm-focused { outline:none; }
 .qe-code .cm-editor.cm-focused .cm-selectionBackground,.qe-code .cm-selectionBackground,.qe-code .cm-content ::selection { background:var(--sidebar-active); }
-.qe-code .cm-matchingBracket { color:var(--accent-strong); outline:1px solid var(--border); background:var(--surface-soft); }
+.qe-code .cm-matchingBracket { color:var(--accent-strong); outline:1px solid var(--accent-strong); background:var(--sidebar-active); border-radius:2px; font-weight:700; }
+.qe-code .cm-nonmatchingBracket { color:var(--danger); background:var(--danger-bg); text-decoration:underline wavy var(--danger); text-underline-offset:3px; }
+.qe-code .cm-syntax-error { text-decoration:underline wavy var(--danger); text-decoration-thickness:1.5px; text-underline-offset:3px; background:color-mix(in srgb, var(--danger-bg) 50%, transparent); }
 .qe-workspace .qe-code .cm-editor .cm-searchMatch { background:var(--sidebar-active); outline:1px solid var(--border); }
 .qe-workspace .qe-code .cm-editor .cm-searchMatch-selected { outline:2px solid var(--focus); }
 .qe-code .cm-foldPlaceholder { background:var(--surface-soft); color:var(--text-muted); border:1px solid var(--border-soft); }
@@ -207,3 +211,23 @@
 .qe-history-content pre { margin:0; padding:12px; height:280px; max-height:40dvh; overflow:auto; border:1px solid var(--border-soft); background:var(--bg); color:var(--text); font:12px/1.6 var(--font-mono); tab-size:4; white-space:pre; }
 .qe-history :focus-visible { outline:2px solid var(--focus); outline-offset:2px; }
 @media(max-width:700px) { .qe-history-content.is-comparing { grid-template-columns:minmax(0,1fr); } .qe-history-list>div { flex-wrap:wrap; } .qe-history-list span { flex-basis:100%; } .qe-history .dialog-actions { flex-wrap:wrap; } }
+
+/* Workspace refinement; retain the existing editor state and semantic palette. */
+.qe-workspace { --qe-syntax-variable: var(--text); --qe-syntax-property: var(--qe-syntax-function); --qe-syntax-comment: var(--text-muted); --qe-syntax-punctuation: var(--text-muted); }
+.qe-code .cm-scroller { font-family: var(--font-mono); line-height: 1.7; scrollbar-width: thin; scrollbar-color: var(--border-soft) transparent; }
+.qe-code .cm-content { padding-block: 14px; }
+.qe-code .cm-line { padding-inline: 12px; }
+.qe-code .cm-gutters { background: var(--bg); color: var(--text-muted); border-right: 1px solid var(--border-soft); }
+.qe-code .cm-activeLine, .qe-code .cm-activeLineGutter { background: var(--surface-soft); }
+.qe-code .cm-matchingBracket { background: var(--sidebar-active); outline: 1px solid var(--accent-strong); border-radius: 2px; }
+.qe-code .cm-selectionBackground { background: var(--sidebar-active) !important; }
+.qe-tab.is-active { box-shadow: inset 0 2px var(--accent-strong); background: var(--surface); }
+.qe-tab button[role=tab] { gap: 8px; }
+.qe-tab button[aria-label^="Close"] { min-width: 28px; }
+.qe-toolbar-group { flex-wrap: wrap; }
+.qe-divider { width: 6px; }
+
+/* Native hidden must take precedence over separator layout rules. */
+.qe-divider[hidden] { display: none; }
+.qe-toolbar { flex-wrap: wrap; }
+.qe-toolbar select { max-width: 190px; background: var(--surface); color: var(--text); border: 1px solid var(--border); border-radius: 5px; }

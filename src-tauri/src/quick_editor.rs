@@ -4,6 +4,8 @@ use std::{fs::{self, File, OpenOptions}, io::{Read, Write}, path::{Component, Pa
 use tauri::Manager;
 pub(crate) mod actions;
 pub(crate) mod snapshots;
+pub(crate) mod research;
+pub(crate) mod paste_new;
 
 const MAX_BYTES: u64 = 2 * 1024 * 1024;
 #[derive(Default)]
@@ -11,7 +13,7 @@ pub struct QuickEditor(pub Mutex<()>);
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct Entry { name: String, path: String, directory: bool, blocked: bool }
+pub struct Entry { name: String, path: String, directory: bool, blocked: bool, size: Option<u64> }
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Document { content: String, line_ending: String, read_only: bool }
@@ -55,7 +57,7 @@ fn validate_relative(relative: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn resolve(app: &tauri::AppHandle, project_id: &str, expected_root: &str, relative: &str, directory: bool) -> Result<(PathBuf, Vec<File>), String> {
+pub(crate) fn resolve(app: &tauri::AppHandle, project_id: &str, expected_root: &str, relative: &str, directory: bool) -> Result<(PathBuf, Vec<File>), String> {
     validate_relative(relative)?;
     let relative_path = Path::new(relative);
     let storage = crate::storage_path(app)?;
@@ -77,6 +79,10 @@ fn resolve(app: &tauri::AppHandle, project_id: &str, expected_root: &str, relati
 }
 
 fn open_text(path: &Path) -> Result<(File, String, bool), String> {
+    open_text_limit(path, MAX_BYTES)
+}
+
+pub(crate) fn open_text_limit(path: &Path, byte_limit: u64) -> Result<(File, String, bool), String> {
     let mut options = OpenOptions::new();
     options.read(true);
     #[cfg(windows)] {
@@ -86,10 +92,10 @@ fn open_text(path: &Path) -> Result<(File, String, bool), String> {
     let mut file = options.open(path).map_err(|_| "Cannot open this file. It may be in use or inaccessible.")?;
     let metadata = file.metadata().map_err(|e| e.to_string())?;
     if !metadata.is_file() || linked(&metadata) { return Err("Only regular, unlinked text files are supported.".into()); }
-    if metadata.len() > MAX_BYTES { return Err("This file exceeds the Quick Editor limit of 2 MiB.".into()); }
+    if metadata.len() > byte_limit { return Err(if byte_limit == MAX_BYTES { "This file exceeds the Quick Editor limit of 2 MiB." } else { "This file exceeds the research read limit of 256 KiB." }.into()); }
     let mut bytes = Vec::new();
-    (&mut file).take(MAX_BYTES + 1).read_to_end(&mut bytes).map_err(|e| e.to_string())?;
-    if bytes.len() as u64 > MAX_BYTES || bytes.contains(&0) { return Err("Binary or oversized file. Choose a UTF-8 text file under 2 MiB.".into()); }
+    (&mut file).take(byte_limit + 1).read_to_end(&mut bytes).map_err(|e| e.to_string())?;
+    if bytes.len() as u64 > byte_limit || bytes.contains(&0) { return Err(if byte_limit == MAX_BYTES { "Binary or oversized file. Choose a UTF-8 text file under 2 MiB." } else { "Binary or oversized research file." }.into()); }
     let content = String::from_utf8(bytes).map_err(|_| "This file is not UTF-8. Quick Editor will not convert its encoding.")?;
     Ok((file, content, metadata.permissions().readonly()))
 }
@@ -118,7 +124,7 @@ pub async fn editor_list(app: tauri::AppHandle, project_id: String, expected_roo
             let entry = entry.map_err(|e| e.to_string())?;
             let Some(name) = entry.file_name().to_str().map(str::to_owned) else { return Err("This folder contains a filename that cannot be represented as UTF-8.".into()); };
             let metadata = fs::symlink_metadata(entry.path()).map_err(|e| e.to_string())?;
-            entries.push(Entry { path: if path.is_empty() { name.clone() } else { format!("{path}/{name}") }, name, directory: metadata.is_dir(), blocked: linked(&metadata) || (!metadata.is_dir() && !metadata.is_file()) });
+            entries.push(Entry { path: if path.is_empty() { name.clone() } else { format!("{path}/{name}") }, name, directory: metadata.is_dir(), blocked: linked(&metadata) || (!metadata.is_dir() && !metadata.is_file()), size: if metadata.is_file() { Some(metadata.len()) } else { None } });
         }
         entries.sort_by(|a, b| b.directory.cmp(&a.directory).then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase())));
         Ok(entries)

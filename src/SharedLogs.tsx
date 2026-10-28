@@ -19,7 +19,7 @@ type Source = { logs: LogEntry[]; projects: Project[]; active: string[]; stoppin
 export const LogsContext = createContext<Source | undefined>(undefined);
 type Subscription = { token: string; projectId: string; label: string };
 type Subscriber = Subscription & { frame: ReturnType<typeof createLogFrames>; rows: Map<number, LogEntry>; sending: boolean; dirty: boolean };
-const scopeEntries = (logs: LogEntry[], id: string) => logs.filter(entry => entry.projectId === id || (!!entry.incidentId && !entry.projectId));
+const scopeEntries = (logs: LogEntry[], id: string) => id ? logs.filter(entry => entry.projectId === id || (!!entry.incidentId && !entry.projectId)) : [];
 
 // Only main ingests service-log/service-log-batch. Other webviews consume projections.
 export function useLogsBridge(source: Source) {
@@ -102,13 +102,13 @@ function useRemoteLogs(projectId: string | undefined) {
   return { source, error: actionError || error, dismiss: () => { setError(''); setActionError(''); } };
 }
 
-export function ProjectLogs({ project }: { project: Project }) {
+export function ProjectLogs({ project, onAttachLogs, onCheckedLogsChange }: { project: Project; onAttachLogs?: (entries: LogEntry[], label: string) => void; onCheckedLogsChange?: (entries: LogEntry[]) => void }) {
   const local = useContext(LogsContext);
   const remote = useRemoteLogs(local ? undefined : project.id);
   const source = local || remote.source;
   const [filter, setFilter] = useState('all'), [search, setSearch] = useState(''), [follow, setFollow] = useState(true), [message, setMessage] = useState('');
   const [error, setError] = useOperationError();
-  useEffect(() => { setError(''); setMessage(''); }, [project.id]);
+  useEffect(() => { setFilter('all'); setSearch(''); setError(''); setMessage(''); }, [project.id]);
   const searchRef = useRef<HTMLInputElement>(null);
   const currentProject = source?.projects.find(item => item.id === project.id);
   const logs = useMemo(() => scopeEntries(source?.logs || [], project.id), [source?.logs, project.id]);
@@ -117,7 +117,7 @@ export function ProjectLogs({ project }: { project: Project }) {
   if (!currentProject) return <p role="status">This project was removed. Services and other projects are unchanged.</p>;
   return <div className="shared-console" onKeyDown={event => { if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'f') { event.preventDefault(); event.stopPropagation(); searchRef.current?.focus(); } }}>
     <OperationNotice message={remote.error || error} dismiss={() => { remote.dismiss(); setError(''); }} /><div className="shared-service-status" role="status">{currentProject.services.map(service => { const key = serviceKey(project.id, service.id); return <span key={key}>{service.name}: {source.stopping.includes(key) ? 'Stopping' : source.active.includes(key) ? 'Active' : 'Stopped'}</span>; })}</div>
-    <LogViewer project={currentProject} logs={logs} filter={filter} setFilter={setFilter} search={search} setSearch={setSearch} searchRef={searchRef} autoScroll={follow} setAutoScroll={setFollow} actionMessage={message} serviceControls={source.controls?.(currentProject) || <LogsServiceControls project={currentProject} />}
+    <LogViewer project={currentProject} logs={logs} filter={filter} setFilter={setFilter} search={search} setSearch={setSearch} searchRef={searchRef} autoScroll={follow} setAutoScroll={setFollow} actionMessage={message} onAttachLogs={onAttachLogs} onCheckedLogsChange={onCheckedLogsChange} serviceControls={source.controls?.(currentProject) || <LogsServiceControls project={currentProject} />}
       onCopy={async (text, notice) => { try { await writeLogClipboard(text); setError(''); setMessage(notice); return true; } catch (cause) { setMessage(''); setError(`Could not copy logs: ${errorMessage(cause)}`); return false; } }}
       onExport={async text => { try { const saved = await exportLogText(currentProject, text); setMessage(saved ? 'Logs exported' : 'Export cancelled'); return saved; } catch (cause) { setMessage(''); setError(`Could not export logs: ${errorMessage(cause)}`); return false; } }}
       onClear={entries => source.clear(entries)} onOpenUrl={url => { void invoke('open_local_url', { url }).then(() => setError('')).catch(cause => setError(`Could not open local URL: ${errorMessage(cause)}`)); }} />

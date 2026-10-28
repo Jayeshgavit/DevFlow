@@ -21,7 +21,7 @@ pub(super) fn excluded(path: &str) -> bool {
             || [".pem", ".key", ".pfx", ".p12", ".keystore", ".jks", ".cert", ".crt", ".map", ".min.js", ".min.css", ".generated.ts", ".g.cs", ".bak", ".tmp", ".log"].iter().any(|suffix| p.ends_with(suffix))
     })
 }
-fn language(path: &str) -> Option<&'static str> {
+pub(super) fn language(path: &str) -> Option<&'static str> {
     let name = path.rsplit('/').next().unwrap_or(path).to_ascii_lowercase();
     Some(match name.rsplit('.').next().unwrap_or("") {
         "ts"|"tsx" => "typescript", "js"|"jsx"|"mjs"|"cjs" => "javascript", "py"|"pyi" => "python",
@@ -34,10 +34,7 @@ fn language(path: &str) -> Option<&'static str> {
     })
 }
 pub(super) fn sensitive_content(text: &str) -> bool {
-    let lower = text.to_ascii_lowercase();
-    ["private key", "private_key", "api_key", "apikey", "api-key", "access_token", "client_secret", "secret_key", "password", "authorization:", "bearer ", "database_url", "connectionstring", "auth_token", "\"token\"", "token =", "token=", "secret =", "secret=", "sk-proj-", "aws_access_key", "ghp_", "github_pat_", "sk_live_", "sk_test_", "xoxb-", "xoxp-", "accountkey=", "sharedaccesssignature=", "-----begin"].iter().any(|needle| lower.contains(needle))
-        || lower.split_whitespace().any(|word| word.contains("://") && word.contains('@'))
-        || text.split_whitespace().any(|word| word.starts_with("eyJ") && word.matches('.').count() >= 2)
+    crate::ai_chat::unsafe_outgoing_content(text) || text.contains('\0')
 }
 fn file_block(path: &str, text: &str) -> String {
     // Delimiter length cannot collide with a fence in the source text.
@@ -152,6 +149,7 @@ fn export(root: &Path, relative: &str, mode: &str, draft: Option<&str>) -> Resul
         collector.walk(&target, &mut rules, "", 0)?;
     } else {
         if ignored(&rules, &target, false) { return Err("Copy blocked: file is ignored by .gitignore.".into()); }
+        validate_ai_file(&target, relative, draft)?;
         if !collector.file(&target, relative, draft)? { return Err("Copy blocked: sensitive, unsupported, binary or oversized file.".into()); }
     }
     let warnings: Vec<String> = collector.skipped.iter().map(|(reason, count)| format!("{reason}: {count}")).collect();
@@ -159,21 +157,40 @@ fn export(root: &Path, relative: &str, mode: &str, draft: Option<&str>) -> Resul
     if !warnings.is_empty() { text.push_str("\nWARNINGS (copy is filtered or incomplete):\n"); text.push_str(&warnings.join("\n")); text.push('\n'); }
     Ok(Export { text, warnings, files: collector.files })
 }
+
+fn validate_ai_file(path: &Path, relative: &str, draft: Option<&str>) -> Result<(), String> {
+    if excluded(relative) { return Err("AI context blocked: sensitive, generated or excluded path.".into()); }
+    let (_file, disk, _) = open_text(path).map_err(|_| "AI context blocked: file is unavailable, binary, or over the 2 MiB editor limit.")?;
+    if draft.is_some_and(|text| text.len() as u64 > MAX_BYTES) { return Err("AI context blocked: draft exceeds the 2 MiB editor limit.".into()); }
+    for (label, text) in [("disk file", disk.as_str()), ("draft", draft.unwrap_or(""))] {
+        if let Some((line, reason)) = crate::ai_chat::outgoing_content_issue(text) {
+            return Err(format!("Attachment blocked: {reason} in {label} on line {line}. Remove the sensitive value or choose another file."));
+        }
+        if text.contains('\0') { return Err("Attachment blocked: binary content.".into()); }
+    }
+    Ok(())
+}
+
 #[tauri::command]
 pub async fn editor_export(app: tauri::AppHandle, project_id: String, expected_root: String, path: String, mode: String, draft: Option<String>) -> Result<Export, String> {
-    if !["file", "folder", "tree"].contains(&mode.as_str()) { return Err("Unknown copy action.".into()); }
+    if !["file", "folder", "tree", "validate"].contains(&mode.as_str()) { return Err("Unknown copy action.".into()); }
     tauri::async_runtime::spawn_blocking(move || {
         let (root, _root_guards) = resolve(&app, &project_id, &expected_root, "", true)?;
+        if mode == "validate" {
+            let (target, _target_guards) = resolve(&app, &project_id, &expected_root, &path, false)?;
+            validate_ai_file(&target, &path, draft.as_deref())?;
+            return Ok(Export { text: String::new(), warnings: vec![], files: 1 });
+        }
         let (_target, _target_guards) = resolve(&app, &project_id, &expected_root, &path, mode != "file")?;
         let mut result = export(&root, &path, &mode, draft.as_deref())?;
         result.text = format!("PROJECT: {}\n{}", root.file_name().unwrap_or_default().to_string_lossy(), result.text);
         Ok(result)
     }).await.map_err(|e| e.to_string())?
 }
-fn valid_name(name: &str) -> Result<(), String> {
+pub(super) fn valid_name(name: &str) -> Result<(), String> {
     validate_relative(name)?;
-    let stem = name.split('.').next().unwrap_or("").to_ascii_uppercase();
-    if name.is_empty() || name.contains('/') || name.chars().any(|c| c.is_control() || "<>\"|?*".contains(c)) || ["CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$"].contains(&stem.as_str()) || (stem.starts_with("COM") || stem.starts_with("LPT")) && stem[3..].chars().all(|c| c.is_ascii_digit() || "¹²³".contains(c)) {
+    let stem = name.split('.').next().unwrap_or("").trim_end_matches(' ').to_ascii_uppercase();
+    if name.is_empty() || name.encode_utf16().count() > 255 || name.contains('/') || name.chars().any(|c| c.is_control() || "<>\"|?*".contains(c)) || ["CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$"].contains(&stem.as_str()) || (stem.starts_with("COM") || stem.starts_with("LPT")) && stem[3..].chars().all(|c| c.is_ascii_digit() || "¹²³".contains(c)) {
         return Err("Choose a single valid Windows filename (no reserved device names).".into());
     }
     Ok(())
@@ -192,7 +209,7 @@ fn rename(source: &Path, destination: &Path) -> Result<(), String> {
     #[cfg(not(windows))] { let _ = (source, destination); Err("Safe rename is currently supported on Windows only.".into()) }
 }
 #[tauri::command]
-pub async fn editor_mutate(app: tauri::AppHandle, window: tauri::WebviewWindow, project_id: String, expected_root: String, path: String, action: String, name: String, lease: u64) -> Result<String, String> {
+pub async fn editor_mutate(app: tauri::AppHandle, window: tauri::WebviewWindow, project_id: String, expected_root: String, path: String, action: String, name: String, lease: u64, create_parents: Option<bool>) -> Result<String, String> {
     let label = window.label().to_owned();
     tauri::async_runtime::spawn_blocking(move || {
         let owner = app.state::<crate::editor_window::EditorWindow>();
@@ -200,7 +217,9 @@ pub async fn editor_mutate(app: tauri::AppHandle, window: tauri::WebviewWindow, 
         session.check_writer(&label, lease)?;
         let state = app.state::<QuickEditor>();
         let _lock = state.0.lock().map_err(|e| e.to_string())?;
-        valid_name(&name)?;
+        if action == "rename" { valid_name(&name)?; }
+        else { validate_relative(&name)?; for part in name.split('/') { valid_name(part)?; } }
+        if excluded(&name) { return Err("Sensitive or generated destinations cannot be created here.".into()); }
         if action == "rename" {
             if path.is_empty() { return Err("The saved project root cannot be renamed here.".into()); }
             let parent = path.rsplit_once('/').map(|(p, _)| p).unwrap_or("");
@@ -212,8 +231,21 @@ pub async fn editor_mutate(app: tauri::AppHandle, window: tauri::WebviewWindow, 
             rename(&source, &destination)?;
             Ok(if parent.is_empty() { name } else { format!("{parent}/{name}") })
         } else if action == "file" || action == "folder" {
-            let (parent, _guards) = resolve(&app, &project_id, &expected_root, &path, true)?;
-            create(&parent.join(&name), action == "folder")?;
+            let mut relative = path.clone();
+            let parts: Vec<&str> = name.split('/').collect();
+            let mut retained = Vec::new();
+            for part in &parts[..parts.len() - 1] {
+                let (parent, guards) = resolve(&app, &project_id, &expected_root, &relative, true)?;
+                retained.extend(guards);
+                let target = parent.join(part);
+                if !target.exists() {
+                    if create_parents != Some(true) { return Err("Parent folder is missing. Enable Create Missing Directories to confirm creation.".into()); }
+                    fs::create_dir(&target).map_err(|e| e.to_string())?;
+                }
+                relative = if relative.is_empty() { part.to_string() } else { format!("{relative}/{part}") };
+            }
+            let (parent, _guards) = resolve(&app, &project_id, &expected_root, &relative, true)?;
+            create(&parent.join(parts.last().ok_or("Filename missing")?), action == "folder")?;
             Ok(if path.is_empty() { name } else { format!("{path}/{name}") })
         } else { Err("Unknown file action.".into()) }
     }).await.map_err(|e| e.to_string())?

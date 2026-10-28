@@ -28,3 +28,14 @@ export function projectServiceState(project: Project, running: string[], startin
 export function stopAllConfirmation(project: Project, action: () => void) {
   return { title: `Stop all services in ${project.name}?`, description: 'Windows force stops each running or starting process tree. Unsaved work in those processes could be lost.', confirmText: 'Force stop all', destructive: true, action };
 }
+
+export function stopScopeConfirmation(project: Project, scope: 'frontend' | 'backend' | 'both' | 'all', services: { name: string }[], action: () => void) {
+  const scopeLabel = scope === 'all' ? 'all services' : scope === 'both' ? 'frontend and backend services' : `${scope} services`;
+  return {
+    title: `Stop ${scopeLabel} in ${project.name}?`,
+    description: `Stop ${services.map(s => s.name).join(', ')}. Only DevFlow-owned process trees will be terminated. Unsaved process work could be lost.`,
+    confirmText: `Stop ${scopeLabel}`,
+    destructive: true,
+    action,
+  };
+}

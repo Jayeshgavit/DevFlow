@@ -1,3 +1,5 @@
+import ChatStorageSettings from './ChatStorageSettings';
+import EditorPreferences from './EditorPreferences';
 import { writeLogClipboard, exportLogText } from './log-actions';
 import { useOperationError } from './use-operation-error';
 import { OperationNotice } from './NotificationCenter';
@@ -32,8 +34,12 @@ import './log-console.css';
 
 import { EditorWorkspace, FloatingEditor, floatingEditor, WindowCloseHandler } from './EditorWorkspace';
 import { LogsServiceControls, ProjectServicesContext, RemoteProjectServices, useProjectServicesBridge } from './ProjectServiceControls';
-import { projectServiceState, stopAllConfirmation } from './project-service-state';
+import { projectServiceState, stopAllConfirmation, stopScopeConfirmation } from './project-service-state';
 import { LogsContext, useLogsBridge, floatLogs, FloatingLogs, floatingLogsProject } from './SharedLogs';
+
+const ApiTester = React.lazy(() => import('./ApiTester'));
+const DeveloperEnvironment = React.lazy(() => import('./DeveloperEnvironment'));
+const PortManager = React.lazy(() => import('./PortManager'));
 
 const storedTheme = (): Theme => { try { const value = localStorage.getItem('devflow-theme'); return value === 'dark' || value === 'light' || value === 'system' ? value : 'system'; } catch { return 'system'; } };
 const storedCompact = () => { try { return localStorage.getItem('devflow-compact') === 'true'; } catch { return false; } };
@@ -66,6 +72,8 @@ function App() {
   const dirty = projectSnapshot.dirty;
   const [selected, setSelected] = useState('');
   const [view, setView] = useState<View>('overview');
+  const [apiTarget, setApiTarget] = useState<{ projectId: string; url: string }>();
+  useEffect(() => { if (view !== 'api' || (apiTarget && apiTarget.projectId !== selected)) setApiTarget(undefined); }, [view, selected, apiTarget]);
   const [editorOpened, setEditorOpened] = useState(false);
   useEffect(() => {
     let disposed = false; let stop: (() => void) | undefined;
@@ -124,7 +132,8 @@ function App() {
   const healthEpoch = useRef(0);
 
   const project = projects.find(item => item.id === selected);
-  const projectLogs = useMemo(() => logs.filter(line => line.projectId === selected || (line.incidentId && !line.projectId)), [logs, selected]);
+  const projectLogs = useMemo(() => selected ? logs.filter(line => line.projectId === selected || (!!line.incidentId && !line.projectId)) : [], [logs, selected]);
+  useEffect(() => { setFilter('all'); setSearch(''); }, [selected]);
   const repeatedErrors = useMemo(() => new Map(groupLogs(logs).filter(group => group.category === 'error' && group.repeatCount >= 3)
     .map(group => [serviceKey(group.entries[0].projectId, group.entries[0].serviceId), group.entries[0].runId])), [logs]);
   const runningCount = running.filter(key => projects.some(item => item.services.some(service => serviceKey(item.id, service.id) === key))).length;
@@ -357,12 +366,16 @@ function App() {
     } catch (cause) { setError(`Could not discover services: ${errorMessage(cause)}`); }
     finally { setDiscoveringServices(false); }
   };
-  const addSelectedService = (service: Service) => {
+  const addSelectedService = async (service: Service) => {
     if (!project || projectStore.current.status !== 'ready') return;
-    projectStore.edit(current => current.map(item => item.id === project.id ? { ...item, services: isConfiguredService(service, item.services) ? item.services : [...item.services, service] } : item));
+    await projectStore.updateAndSave(current => current.map(item => {
+      if (item.id !== project.id) return item;
+      if (isConfiguredService(service, item.services)) throw new Error('A service already uses this working directory. Edit the existing service or choose another folder.');
+      return { ...item, services: [...item.services, service] };
+    }));
     setServiceCandidates(null);
     setError('');
-    setBulkSummary({ projectId: project.id, text: 'Service added. Review it, then save changes.', failed: false });
+    setBulkSummary({ projectId: project.id, text: 'Service configuration saved. Review the command before starting.', failed: false });
   };
   const rescanServices = async () => {
     if (!project || projectStore.current.status !== 'ready' || discoveringServices) return;
@@ -404,7 +417,7 @@ function App() {
     } catch (cause) { setError(`Could not rescan services: ${errorMessage(cause)}`); }
     finally { setDiscoveringServices(false); }
   };
-  const suggestService = useCallback((cwd: string, framework: string) => invoke<Service | null>('suggest_service', { root: cwd, projectRoot: project?.root || cwd, framework }), [project?.root]);
+  const suggestService = useCallback((cwd: string, framework: string) => invoke<Service | null>('suggest_service', { root: cwd, projectRoot: cwd, framework }), []);
   const renameProject = (target: Project) => {
     if (projectStore.current.status !== 'ready') { setError('Retry Load before renaming a project.'); return; }
     setActionMessage('');
@@ -484,7 +497,7 @@ function App() {
   const syncPendingKeys = () => setPendingKeys([...new Set([...startingKeys.current, ...stoppingKeys.current])]);
   const start = async (target: Project, service: Service) => {
     const key = serviceKey(target.id, service.id);
-    if (removeLock.current || (logStopLock.current && cancelledBulkStarts.current.has(key)) || startingKeys.current.has(key) || stoppingKeys.current.has(key)) return false;
+    if (removeLock.current || (bulkLock.current && cancelledBulkStarts.current.has(key)) || startingKeys.current.has(key) || stoppingKeys.current.has(key)) return false;
     startingKeys.current.add(key);
     cancelledStarts.current.delete(key);
     syncPendingKeys();
@@ -549,16 +562,17 @@ function App() {
     if (bulkLock.current) return;
     setConfirm({ title: `Restart ${service.name}?`, description: 'Restart first terminates and confirms cleanup of the service process tree, then starts one replacement.', confirmText: 'Restart service', destructive: true, action: () => { void (async () => { const key = serviceKey(target.id, service.id); if (restartingKeys.current.has(key) || bulkLock.current) return; restartingKeys.current.add(key); setBusy(true); try { if (await stop(target, service)) await start(target, service); } finally { restartingKeys.current.delete(key); setBusy(false); } })(); } });
   };
-  const runProject = async (target: Project, mode: BulkMode) => {
-    if (bulkLock.current || removeLock.current || logStopLock.current) return;
+  const runProject = async (target: Project, mode: BulkMode, targetServices: Service[] = target.services) => {
+    if (bulkLock.current || removeLock.current) return;
     bulkLock.current = true;
-    cancelledBulkStarts.current.clear();
+    for (const service of targetServices) cancelledBulkStarts.current.add(serviceKey(target.id, service.id));
+    if (mode === 'start') cancelledBulkStarts.current.clear();
     setBusy(true);
     setBulkSummary(null);
-    setBulkProgress(current => Object.fromEntries(Object.entries(current).filter(([key]) => !target.services.some(service => key === serviceKey(target.id, service.id)))));
+    setBulkProgress(current => Object.fromEntries(Object.entries(current).filter(([key]) => !targetServices.some(service => key === serviceKey(target.id, service.id)))));
     try {
       const results = await runBulkAction({
-        mode, projectId: target.id, services: target.services,
+        mode, projectId: target.id, services: targetServices,
         getActive: refreshServiceState,
         isStarting: key => startingKeys.current.has(key),
         isCancelled: key => cancelledBulkStarts.current.has(key),
@@ -593,7 +607,7 @@ function App() {
     if (bulkLock.current) return;
     setConfirm(stopAllConfirmation(target, () => { void runProject(target, 'stop'); }));
   };
-  const editorServiceSnapshot = useMemo(() => ({ busy: busy || logStopPending, stopPending: logStopPending, activeKeys: [...new Set([...running, ...pendingKeys, ...backendStopping, ...Object.keys(bulkProgress).filter(key => bulkProgress[key].step === 'queued')])], stoppingKeys: [...stoppingKeys.current],
+  const editorServiceSnapshot = useMemo(() => ({ busy, stopPending: busy, activeKeys: [...new Set([...running, ...pendingKeys, ...backendStopping, ...Object.keys(bulkProgress).filter(key => bulkProgress[key].step === 'queued')])], stoppingKeys: [...stoppingKeys.current],
     states: projects.map(target => {
       const issues = { ...serviceErrors };
       target.services.forEach(service => {
@@ -602,31 +616,19 @@ function App() {
       });
       return projectServiceState(target, running, [...startingKeys.current], [...stoppingKeys.current], issues, backendStopping);
     }),
-  }), [projects, running, pendingKeys, backendStopping, serviceErrors, serviceExits, busy, logStopPending, bulkProgress]);
+  }), [projects, running, pendingKeys, backendStopping, serviceErrors, serviceExits, busy, bulkProgress]);
   useProjectServicesBridge(editorServiceSnapshot, async (projectId, mode) => {
     const target = projects.find(item => item.id === projectId);
     if (!target) throw new Error('Project no longer exists. Select another project.');
     // Stop requests from the floating editor have already used the shared confirmation.
     if (mode === 'start') { void runProject(target, 'start').catch(cause => setError(errorMessage(cause))); }
-    else await stopLogScope(target, mode === 'stop' ? 'all' : mode.slice(5) as LogStopScope);
+    else { const scope = mode === 'stop' ? 'all' : mode.slice(5) as LogStopScope; const scoped = logStopServices(target.services, scope); if (scoped.length) await runProject(target, 'stop', scoped); }
   });
-  const stopLogScope = async (target: Project, scope: LogStopScope) => {
-    if (logStopLock.current) return;
-    logStopLock.current = true; setLogStopPending(true);
-    const scoped = logStopServices(target.services, scope);
-    for (const service of scoped) cancelledBulkStarts.current.add(serviceKey(target.id, service.id));
-    try {
-      const active = await refreshServiceState();
-      const toStop = scoped.filter(service => { const key = serviceKey(target.id, service.id); return !stoppingKeys.current.has(key) && (active.includes(key) || startingKeys.current.has(key)); });
-      const results = await Promise.all(toStop.map(service => stop(target, service)));
-      const failed = results.filter(result => !result).length;
-      setActionMessage(`${results.length - failed} stopped${failed ? `, ${failed} failed — inspect service errors` : ''}. Queued starts in this scope cancelled.`);
-      if (failed) throw new Error(`${failed} service stops failed. Inspect service errors before retrying.`);
-    } finally { logStopLock.current = false; setLogStopPending(false); }
-  };
   const requestLogStop = (target: Project, scope: LogStopScope) => {
     const scoped = logStopServices(target.services, scope);
-    setConfirm({ title: `Stop ${scope} in ${target.name}?`, description: `Stop ${scoped.map(service => service.name).join(', ')}. Only DevFlow-owned process trees will be terminated. Queued starts in this scope will be cancelled. Unsaved process work could be lost.`, confirmText: `Stop ${scope}`, destructive: true, action: () => { void stopLogScope(target, scope).catch(cause => setError(errorMessage(cause))); } });
+    if (bulkLock.current) return;
+    if (!scoped.length) return;
+    setConfirm(stopScopeConfirmation(target, scope, scoped, () => { void runProject(target, 'stop', scoped).catch(cause => setError(errorMessage(cause))); }));
   };
   const logStopControls = (target: Project) => target.id ? <LogsServiceControls project={target} /> : null;
   const openDirectory = async (path: string, target: 'terminal' | 'folder') => {
@@ -688,10 +690,13 @@ function App() {
   }, [projects]);
   return <ProjectServicesContext.Provider value={{ ...editorServiceSnapshot, request: (target, mode) => { const current = projects.find(item => item.id === target.id); if (current) { if (mode === 'start') void runProject(current, 'start'); else requestLogStop(current, mode === 'stop' ? 'all' : mode.slice(5) as LogStopScope); } } }}><LogsContext.Provider value={{ logs, projects, active: [...running, ...pendingKeys], stopping: backendStopping, clear: clearSharedLogs, controls: logStopControls }}><div className="app-shell"><Sidebar view={view} setView={setView} projects={projects} selected={selected} selectProject={selectProject} runningCount={runningCount} theme={theme} setTheme={setTheme} importProject={() => void importProject()} /><main className="main-content"><div className="topline"><span>LOCAL DEVELOPMENT / DEVFLOW</span><span className="topline-right"><NotificationCenter store={notifications} projects={projects} onOpen={openIncident} /><span className="local-dot" /> ALL SYSTEMS LOCAL</span></div><OperationNotice message={error} dismiss={() => setError('')} /><SystemCenter active={view === 'system' || view === 'maintenance'} section={view === 'maintenance' ? 'maintenance' : 'system'} onSection={setView} onProjects={() => setView('projects')} />{projectSnapshot.status === 'loading' ? <div className="loading-state" role="status">Loading your workspace…</div> : projectSnapshot.status === 'failed' ? <Card className="settings-card"><h2>Could not load saved projects</h2><p role="alert">DevFlow could not read projects.json: {projectSnapshot.loadError}</p><p>Your saved file has not been changed. Check its permissions or JSON contents, then try loading again. Project changes are blocked until it loads successfully.</p><Button tone="primary" onClick={() => void retryLoad()}>Retry Load</Button></Card> : <>
     {view === 'overview' && <><header className="page-header"><div><span className="eyebrow">YOUR WORKSPACE AT A GLANCE</span><h1>Good to see you<span className="accent-period">.</span></h1><p>Pick up where you left off, or bring in a new project.</p></div><Button tone="primary" icon={<FolderPlus size={17} />} onClick={() => void importProject()}>Import project</Button></header><div className="overview-grid"><Card className="summary-card summary-projects"><span className="summary-label">SAVED PROJECTS</span><strong>{projects.length.toString().padStart(2, '0')}</strong><span>Workspaces ready to open</span><FolderPlus className="summary-watermark" size={76} strokeWidth={1} /></Card><Card className="summary-card summary-running"><span className="summary-label">RUNNING SERVICES</span><strong>{runningCount.toString().padStart(2, '0')}</strong><span>Across your saved projects</span><Play className="summary-watermark" size={76} strokeWidth={1} /></Card></div><div className="overview-columns"><Card className="recent-card"><div className="panel-heading"><div><span className="eyebrow">PICK UP WHERE YOU LEFT OFF</span><h2>Recent projects</h2></div><Button tone="quiet" onClick={() => setView('projects')}>View all <ArrowRight size={15} /></Button></div>{recentProjects.length ? <div className="recent-list">{recentProjects.map(item => <button key={item.id} className="recent-row" onClick={() => { selectProject(item.id); setView('projects'); }}><span className="recent-initial">{item.name.slice(0, 1).toUpperCase()}</span><span className="recent-info"><strong>{item.name}</strong><small>{item.root}</small></span><span className="recent-meta">{item.services.length} services</span><ArrowRight size={17} /></button>)}</div> : <EmptyState icon={<FolderPlus size={23} />} title="Your projects start here" description="Import a local folder to detect services and build your workspace." action={<Button tone="secondary" onClick={() => void importProject()}>Import a project</Button>} />}</Card><Card className="quick-card"><span className="eyebrow">QUICK START</span><h2>Ready when you are.</h2><p>Choose a saved project, review its commands, then launch the services you need.</p><div className="quick-steps"><span><b>01</b> Import a project</span><span><b>02</b> Review services</span><span><b>03</b> Start and monitor</span></div><Button tone="primary" onClick={() => { if (project) setView('projects'); else void importProject(); }}>{project ? 'Open workspace' : 'Import project'} <ArrowRight size={16} /></Button></Card></div></>}
-    {view === 'projects' && <><header className="page-header"><div><span className="eyebrow">PROJECT WORKSPACES</span><h1>Projects<span className="accent-period">.</span></h1><p>Review commands before you run them. Every service stays in your control.</p></div><Button tone="primary" icon={<FolderPlus size={17} />} onClick={() => void importProject()}>Import project</Button></header>{project ? <><div className="project-heading"><div><span className="eyebrow">CURRENT PROJECT</span><h2>{project.name}</h2><p>{project.root}</p></div><div className="project-heading-actions"><ProjectShortcuts project={project} onTerminal={path => openDirectory(path, 'terminal')} onFolder={path => openDirectory(path, 'folder')} onCopyPath={copyDirectoryPath} onAiCli={openInAiCli} /><Status running={projectRunning > 0} /><Button icon={<Square size={16} />} disabled={busy || projectActive === 0} onClick={() => requestStopAll(project)}>Stop all</Button><Button tone="primary" icon={<Play size={16} />} disabled={busy || project.services.length === 0 || projectActive === project.services.length} onClick={() => void runProject(project, 'start')}>Start all</Button><Button icon={<Pencil size={15} />} disabled={busy} onClick={() => renameProject(project)}>Rename</Button><Button tone="danger" icon={<Trash2 size={15} />} disabled={busy || projectActive > 0} title={projectActive > 0 ? 'Stop all services before removing this project' : undefined} onClick={() => removeProject(project)}>Remove project</Button></div></div>{bulkSummary?.projectId === project.id && <p className={`bulk-summary ${bulkSummary.failed ? 'bulk-summary-error' : ''}`} role="status">{bulkSummary.text}</p>}<div className="section-heading"><div><span className="eyebrow">CONFIGURATION</span><h2>Services <span className="heading-count">{project.services.length}</span></h2></div><div className="toolbar-actions"><Button icon={<Save size={15} />} onClick={() => void save()} disabled={!dirty}>Save changes</Button><Button icon={<RefreshCw size={15} />} disabled={discoveringServices} onClick={() => void rescanServices()}>Rescan services</Button><Button icon={<FolderPlus size={15} />} disabled={discoveringServices} onClick={() => void addService()}>Add service</Button></div></div>{dirty && <p className="unsaved-note" role="status">Unsaved changes. Save before leaving this session.</p>}<div className="service-list">{project.services.length ? project.services.map(service => <ServiceRow key={service.id} service={service} running={running.includes(serviceKey(project.id, service.id))} {...servicePresentation(project, service)} busy={busy || stoppingKeys.current.has(serviceKey(project.id, service.id))} starting={startingKeys.current.has(serviceKey(project.id, service.id))} progress={bulkProgress[serviceKey(project.id, service.id)]} onEdit={(field, value) => editService(service.id, field, value)} onStart={() => void start(project, service)} onStop={() => requestStop(project, [service])} onRestart={() => restart(project, service)} onRemove={() => removeService(service)} />) : <EmptyState icon={<Terminal size={23} />} title="No services detected" description="Add a discovered service or create a manual configuration." action={<Button disabled={discoveringServices} onClick={() => void addService()}>Add service</Button>} />}</div><div className="inline-logs"><div className="section-heading"><div><span className="eyebrow">LATEST OUTPUT</span><h2>Activity</h2></div><Button tone="quiet" onClick={() => setView('logs')}>Open logs <ArrowRight size={15} /></Button></div><div className="activity-preview">{logs.filter(line => line.projectId === selected || (line.incidentId && !line.projectId)).slice(-3).map((line, index) => <div key={index}><span>{line.serviceId}</span><code>{line.message}</code></div>)}{!logs.some(line => line.projectId === selected) && <p>No output yet. Start a service to see its activity.</p>}</div></div></> : <EmptyState icon={<FolderPlus size={26} />} title="No project selected" description="Import a project folder to detect services, or select a saved project from the sidebar." action={<Button tone="primary" onClick={() => void importProject()}>Import project</Button>} />}</>}
+    {view === 'projects' && <><header className="page-header"><div><span className="eyebrow">PROJECT WORKSPACES</span><h1>Projects<span className="accent-period">.</span></h1><p>Review commands before you run them. Every service stays in your control.</p></div><Button tone="primary" icon={<FolderPlus size={17} />} onClick={() => void importProject()}>Import project</Button></header>{project ? <><div className="project-heading"><div><span className="eyebrow">CURRENT PROJECT</span><h2>{project.name}</h2><p>{project.root}</p></div><div className="project-heading-actions"><ProjectShortcuts project={project} onTerminal={path => openDirectory(path, 'terminal')} onFolder={path => openDirectory(path, 'folder')} onCopyPath={copyDirectoryPath} onAiCli={openInAiCli} /><Status running={projectRunning > 0} /><Button icon={<Square size={16} />} disabled={busy || projectActive === 0} onClick={() => requestStopAll(project)}>Stop all</Button><Button tone="primary" icon={<Play size={16} />} disabled={busy || project.services.length === 0 || projectActive === project.services.length} onClick={() => void runProject(project, 'start')}>Start all</Button><Button icon={<Pencil size={15} />} disabled={busy} onClick={() => renameProject(project)}>Rename</Button><Button tone="danger" icon={<Trash2 size={15} />} disabled={busy || projectActive > 0} title={projectActive > 0 ? 'Stop all services before removing this project' : undefined} onClick={() => removeProject(project)}>Remove project</Button></div></div>{bulkSummary?.projectId === project.id && <p className={`bulk-summary ${bulkSummary.failed ? 'bulk-summary-error' : ''}`} role="status">{bulkSummary.text}</p>}<div className="section-heading"><div><span className="eyebrow">CONFIGURATION</span><h2>Services <span className="heading-count">{project.services.length}</span></h2></div><div className="toolbar-actions"><Button icon={<Save size={15} />} onClick={() => void save()} disabled={!dirty}>Save changes</Button><Button icon={<RefreshCw size={15} />} disabled={discoveringServices} onClick={() => void rescanServices()}>Rescan services</Button><Button icon={<FolderPlus size={15} />} disabled={discoveringServices} onClick={() => void addService()}>Add service</Button></div></div>{dirty && <p className="unsaved-note" role="status">Unsaved changes. Save before leaving this session.</p>}<div className="service-list">{project.services.length ? project.services.map(service => <ServiceRow onOpenApi={url => { setApiTarget({ projectId: project.id, url }); setView('api'); }} key={service.id} service={service} running={running.includes(serviceKey(project.id, service.id))} {...servicePresentation(project, service)} busy={busy || stoppingKeys.current.has(serviceKey(project.id, service.id))} starting={startingKeys.current.has(serviceKey(project.id, service.id))} progress={bulkProgress[serviceKey(project.id, service.id)]} onEdit={(field, value) => editService(service.id, field, value)} onStart={() => void start(project, service)} onStop={() => requestStop(project, [service])} onRestart={() => restart(project, service)} onRemove={() => removeService(service)} />) : <EmptyState icon={<Terminal size={23} />} title="No services detected" description="Add a discovered service or create a manual configuration." action={<Button disabled={discoveringServices} onClick={() => void addService()}>Add service</Button>} />}</div><div className="inline-logs"><div className="section-heading"><div><span className="eyebrow">LATEST OUTPUT</span><h2>Activity</h2></div><Button tone="quiet" onClick={() => setView('logs')}>Open logs <ArrowRight size={15} /></Button></div><div className="activity-preview">{logs.filter(line => line.projectId === selected || (line.incidentId && !line.projectId)).slice(-3).map((line, index) => <div key={index}><span>{line.serviceId}</span><code>{line.message}</code></div>)}{!logs.some(line => line.projectId === selected) && <p>No output yet. Start a service to see its activity.</p>}</div></div></> : <EmptyState icon={<FolderPlus size={26} />} title="No project selected" description="Import a project folder to detect services, or select a saved project from the sidebar." action={<Button tone="primary" onClick={() => void importProject()}>Import project</Button>} />}</>}
     <div className="logs-workspace" hidden={view !== 'logs'}><header className="console-page-header"><h1><Terminal size={19} />Logs</h1>{project && <Button onClick={() => void floatLogs(project).then(() => setError('')).catch(cause => setError(errorMessage(cause)))}>Float logs</Button>}{project && <><label className="console-project-picker"><span className="sr-only">Project</span><select value={selected} onChange={event => selectProject(event.target.value)}>{projects.map(item => <option value={item.id} key={item.id}>{item.name}</option>)}</select></label><ProjectShortcuts project={project} onTerminal={path => openDirectory(path, 'terminal')} onFolder={path => openDirectory(path, 'folder')} onCopyPath={copyDirectoryPath} onAiCli={openInAiCli} /></>}</header>{project && serviceAlerts(project)}{project ? logWorkspace(project) : logWorkspace({ id: '', name: 'DevFlow', root: '', services: [] })}</div>
+    {view === 'api' && <React.Suspense fallback={<div className="loading-state" role="status">Loading API Tester…</div>}><ApiTester running={running.filter(key => !stoppingKeys.current.has(key))} key={selected} project={project} projects={projects} selectProject={selectProject} initialUrl={apiTarget?.projectId === selected ? apiTarget.url : undefined} /></React.Suspense>}
+    {view === 'ports' && <React.Suspense fallback={<div className="loading-state" role="status">Loading Port Manager…</div>}><PortManager project={project} projects={projects} selectProject={selectProject} /></React.Suspense>}
+    {view === 'environment' && <React.Suspense fallback={<div className="loading-state" role="status">Loading Developer Environment…</div>}><DeveloperEnvironment project={project} projects={projects} selectProject={selectProject} /></React.Suspense>}
     {editorOpened && <div hidden={view !== 'editor'}><React.Suspense fallback={<div className="loading-state" role="status">Loading Quick Editor…</div>}><EditorWorkspace active={view === 'editor'} projects={projects} selected={project} onDock={() => setView('editor')} /></React.Suspense></div>}
-    {view === 'settings' && <><header className="page-header"><div><span className="eyebrow">PREFERENCES</span><h1>Settings<span className="accent-period">.</span></h1><p>Make the workspace comfortable for the way you work.</p></div><Settings2 size={23} className="header-icon" /></header><Card className="settings-card"><div className="settings-heading"><span className="settings-symbol">Aa</span><div><h2>Appearance</h2><p>Theme preferences are saved on this device.</p></div></div><div className="setting-row"><div><strong>Color theme</strong><span>Choose a look, or follow Windows.</span></div><div className="segmented-control" role="group" aria-label="Color theme">{(['light', 'dark', 'system'] as Theme[]).map(option => <button key={option} className={theme === option ? 'is-active' : ''} aria-pressed={theme === option} onClick={() => setTheme(option)}>{option[0].toUpperCase() + option.slice(1)}</button>)}</div></div><div className="setting-row"><div><strong>Compact layout</strong><span>Fit more services and logs on screen.</span></div><label className="switch"><input type="checkbox" checked={compact} onChange={event => setCompact(event.target.checked)} /><span className="switch-track" /><span className="sr-only">Compact layout</span></label></div></Card><NotificationSettings store={notifications} /><Card className="settings-card shortcuts-card"><div className="settings-heading"><span className="settings-symbol"><Terminal size={21} /></span><div><h2>Keyboard shortcuts</h2><p>Shortcuts work only while DevFlow is focused.</p></div></div><div className="shortcut-list">{[['Ctrl+1', 'Overview'], ['Ctrl+2', 'Projects'], ['Ctrl+3', 'Logs'], ['Ctrl+4', 'System Monitor'], ['Ctrl+5', 'Maintenance'], ['Ctrl+,', 'Settings'], ['Ctrl+F', 'Focus log search in Logs'], ['Ctrl+K', 'Find a project or service'], ['Esc', 'Close the active overlay']].map(([keys, label]) => <div className="shortcut-row" key={keys}><kbd>{keys}</kbd><span>{label}</span></div>)}</div></Card><Card className="settings-card about-card"><div className="settings-heading"><span className="settings-symbol"><Terminal size={21} /></span><div><h2>Local by design</h2><p>Projects are saved in DevFlow's local application config. Logs remain in this session.</p></div></div></Card></>}
+    {view === 'settings' && <><header className="page-header"><div><span className="eyebrow">PREFERENCES</span><h1>Settings<span className="accent-period">.</span></h1><p>Make the workspace comfortable for the way you work.</p></div><Settings2 size={23} className="header-icon" /></header><Card className="settings-card"><div className="settings-heading"><span className="settings-symbol">Aa</span><div><h2>Appearance</h2><p>Theme preferences are saved on this device.</p></div></div><div className="setting-row"><div><strong>Color theme</strong><span>Choose a look, or follow Windows.</span></div><div className="segmented-control" role="group" aria-label="Color theme">{(['light', 'dark', 'system'] as Theme[]).map(option => <button key={option} className={theme === option ? 'is-active' : ''} aria-pressed={theme === option} onClick={() => setTheme(option)}>{option[0].toUpperCase() + option.slice(1)}</button>)}</div></div><div className="setting-row"><div><strong>Compact layout</strong><span>Fit more services and logs on screen.</span></div><label className="switch"><input type="checkbox" checked={compact} onChange={event => setCompact(event.target.checked)} /><span className="switch-track" /><span className="sr-only">Compact layout</span></label></div></Card><ChatStorageSettings /><EditorPreferences /><NotificationSettings store={notifications} /><Card className="settings-card shortcuts-card"><div className="settings-heading"><span className="settings-symbol"><Terminal size={21} /></span><div><h2>Keyboard shortcuts</h2><p>Shortcuts work only while DevFlow is focused.</p></div></div><div className="shortcut-list">{[['Ctrl+1', 'Overview'], ['Ctrl+2', 'Projects'], ['Ctrl+3', 'Logs'], ['Ctrl+4', 'System Monitor'], ['Ctrl+5', 'Maintenance'], ['Ctrl+,', 'Settings'], ['Ctrl+F', 'Focus log search in Logs'], ['Ctrl+K', 'Find a project or service'], ['Esc', 'Close the active overlay']].map(([keys, label]) => <div className="shortcut-row" key={keys}><kbd>{keys}</kbd><span>{label}</span></div>)}</div></Card><Card className="settings-card about-card"><div className="settings-heading"><span className="settings-symbol"><Terminal size={21} /></span><div><h2>Local by design</h2><p>Projects are saved in DevFlow's local application config. Logs remain in this session.</p></div></div></Card></>}
   </>}</main>{confirm && <ConfirmDialog title={confirm.title} description={confirm.description} confirmText={confirm.confirmText} destructive={confirm.destructive} onCancel={() => setConfirm(null)} onConfirm={() => { const action = confirm.action; setConfirm(null); action(); }} />}{renaming && <RenameProjectDialog key={renaming.id} currentName={renaming.name} onSave={saveProjectName} onCancel={() => setRenaming(null)} />}{serviceCandidates && project && <AddServiceDialog candidates={serviceCandidates} projectRoot={project.root} onAdd={addSelectedService} onSuggest={suggestService} onCancel={() => setServiceCandidates(null)} />}{quickSearchOpen && <QuickSearchDialog projects={projects} onSelect={id => { selectProject(id); setView('projects'); setQuickSearchOpen(false); }} onCancel={() => setQuickSearchOpen(false)} />}</div></LogsContext.Provider></ProjectServicesContext.Provider>;
 }
 

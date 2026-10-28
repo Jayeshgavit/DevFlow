@@ -9,7 +9,7 @@ import { Button, ConfirmDialog, FloatingMenu } from './components';
 import { logStopServices, type LogStopScope } from './log-utils';
 import { serviceKey } from './types';
 import type { Project } from './types';
-import { stopAllConfirmation, type ProjectServiceState } from './project-service-state';
+import { stopAllConfirmation, stopScopeConfirmation, type ProjectServiceState } from './project-service-state';
 
 export type ServiceMode = 'start' | 'stop' | 'stop-frontend' | 'stop-backend' | 'stop-both';
 type Mode = ServiceMode;
@@ -29,7 +29,7 @@ export function useProjectServicesBridge(snapshot: Snapshot, action: (projectId:
     void (async () => {
       const subscribe = await listen<string>('project-services-subscribe', event => {
         const label = event.payload;
-        const valid = label === 'quick-editor' || latest.current.snapshot.states.some(state => label === 'logs-' + Array.from(new TextEncoder().encode(state.projectId), byte => byte.toString(16).padStart(2, '0')).join(''));
+        const valid = label === 'quick-editor' || label.startsWith('logs-');
         if (!disposed && valid) { subscribers.current.add(label); publish(label); }
       });
       if (disposed) { subscribe(); return; } stops.push(subscribe);
@@ -78,7 +78,7 @@ export function RemoteProjectServices({ children }: { children: React.ReactNode 
     });
   };
   return <ProjectServicesContext.Provider value={{ ...snapshot, busy: snapshot.busy || pending, stopPending: snapshot.stopPending || pending, request: (project, mode) => {
-    if (mode !== 'start') { const scope = mode === 'stop' ? 'all' : mode.slice(5) as LogStopScope; const services = logStopServices(project.services, scope); setConfirmation({ ...stopAllConfirmation(project, () => send(project, mode)), title: `Stop ${scope === 'all' ? 'all services' : scope} in ${project.name}?`, description: `Stop ${services.map(service => service.name).join(', ')}. Only DevFlow-owned process trees will be terminated. Unsaved process work could be lost.` }); }
+    if (mode !== 'start') { const scope = mode === 'stop' ? 'all' : mode.slice(5) as LogStopScope; const services = logStopServices(project.services, scope); setConfirmation(stopScopeConfirmation(project, scope, services, () => send(project, mode))); }
     else send(project, mode);
   } }}>{children}<OperationNotice message={error} dismiss={() => setError('')} />{confirmation && <ConfirmDialog {...confirmation} onCancel={() => setConfirmation(undefined)} onConfirm={() => { const action = confirmation.action; setConfirmation(undefined); action(); }} />}</ProjectServicesContext.Provider>;
 }

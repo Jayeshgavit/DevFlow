@@ -7,7 +7,7 @@ export type Project = { id: string; name: string; root: string; services: Servic
 export type LogLine = { projectId: string; serviceId: string; stream: string; message: string; receivedAt?: number; incidentId?: string; systemSeverity?: 'info' | 'success' | 'warning' | 'error'; runId?: string; sequence?: number };
 export type ServiceLogBatch = { projectId: string; serviceId: string; stream: string; runId: string; lines: { message: string; sequence: number; receivedAt: number }[] };
 export type ServiceExit = { projectId: string; serviceId: string; exitCode: number | null; status: string; stopRequested: boolean; runId?: string };
-export type View = 'overview' | 'projects' | 'logs' | 'editor' | 'system' | 'maintenance' | 'settings';
+export type View = 'overview' | 'projects' | 'ports' | 'environment' | 'logs' | 'api' | 'editor' | 'system' | 'maintenance' | 'settings';
 export type Theme = 'light' | 'dark' | 'system';
 
 export const serviceKey = (projectId: string, serviceId: string) => `${projectId}::${serviceId}`;

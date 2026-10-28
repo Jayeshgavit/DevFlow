@@ -270,6 +270,64 @@ export function logStopServices<T extends { id: string; name: string; role?: str
   return services.filter(service => scope === 'all' || (scope === 'both' ? serviceGroup(service) !== null : serviceGroup(service) === scope));
 }
 
+export function buildServiceOptions<T extends { id: string; name: string; role?: string }>(services: T[]): { value: string; label: string }[] {
+  const seen = new Set<string>();
+  const list: T[] = [];
+  for (const service of services) {
+    if (service.id && !seen.has(service.id)) {
+      seen.add(service.id);
+      list.push(service);
+    }
+  }
+  const frontendServices = list.filter(s => serviceGroup(s) === 'frontend');
+  const backendServices = list.filter(s => serviceGroup(s) === 'backend');
+  const nameCounts = new Map<string, number>();
+  for (const s of list) {
+    nameCounts.set(s.name, (nameCounts.get(s.name) || 0) + 1);
+  }
+  const options: { value: string; label: string }[] = [
+    { value: 'all', label: 'Combined services' }
+  ];
+  if (frontendServices.length > 1) {
+    options.push({ value: 'role:frontend', label: `Frontend (all ${frontendServices.length})` });
+  }
+  if (backendServices.length > 1) {
+    options.push({ value: 'role:backend', label: `Backend (all ${backendServices.length})` });
+  }
+  for (const service of list) {
+    const isDuplicateName = (nameCounts.get(service.name) || 0) > 1;
+    const label = isDuplicateName ? `${service.name} (${service.id})` : service.name;
+    options.push({ value: service.id, label });
+  }
+  return options;
+}
+
+export function remapServiceFilter<T extends { id: string; name: string; role?: string }>(filter: string, services: T[]): string {
+  if (filter === 'all') return 'all';
+  const seen = new Set<string>();
+  const list: T[] = [];
+  for (const service of services) {
+    if (service.id && !seen.has(service.id)) {
+      seen.add(service.id);
+      list.push(service);
+    }
+  }
+  const frontendServices = list.filter(s => serviceGroup(s) === 'frontend');
+  const backendServices = list.filter(s => serviceGroup(s) === 'backend');
+  if (filter === 'role:frontend') {
+    if (frontendServices.length === 0) return 'all';
+    if (frontendServices.length === 1) return frontendServices[0].id;
+    return 'role:frontend';
+  }
+  if (filter === 'role:backend') {
+    if (backendServices.length === 0) return 'all';
+    if (backendServices.length === 1) return backendServices[0].id;
+    return 'role:backend';
+  }
+  const exists = list.some(s => s.id === filter);
+  return exists ? filter : 'all';
+}
+
 export type LogCopyKind = 'all' | 'frontend' | 'backend' | 'errors' | 'frontend-errors' | 'backend-errors' | 'current';
 export function logCopyGroups(project: { id: string; services: { id: string; name: string; role?: string }[] }, groups: LogGroup[], filtered: LogGroup[], kind: LogCopyKind): LogGroup[] {
   const source = kind === 'current' ? filtered : groups;

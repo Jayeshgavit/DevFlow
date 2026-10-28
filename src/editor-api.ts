@@ -1,19 +1,24 @@
 import { invoke } from '@tauri-apps/api/core';
 import type { Project } from './types';
 
-export type FileEntry = { name: string; path: string; directory: boolean; blocked: boolean };
+export type FileEntry = { name: string; path: string; directory: boolean; blocked: boolean; size?: number | null };
 export type FileDocument = { content: string; lineEnding: 'LF' | 'CRLF' | 'mixed'; readOnly: boolean };
 export type CopyExport = { text: string; warnings: string[]; files: number };
 export type FileVersion = { id: string; timestamp: number; path: string };
 export type FileHistory = { versions: FileVersion[]; limitation: string };
 export type FileComparison = { snapshot: string; current: FileDocument };
+export type NewFileInput = { path: string; content: string };
+export type NewFileReview = { path: string; missing: string[]; existing: boolean; error: string | null; created: boolean };
+export type NewFileOutcome = { items: NewFileReview[]; directories: string[] };
 export const editorApi = {
+  createFiles: (project: Project, files: NewFileInput[], lease: number, preview: boolean, createParents: boolean) => invoke<NewFileOutcome>('editor_create_files', { projectId: project.id, expectedRoot: project.root, files, lease, preview, createParents }),
   history: (project: Project, path: string) => invoke<FileHistory>('editor_history', { projectId: project.id, expectedRoot: project.root, path }),
   snapshot: (project: Project, path: string, id: string) => invoke<FileComparison>('editor_snapshot', { projectId: project.id, expectedRoot: project.root, path, id }),
   restore: (project: Project, path: string, id: string, expected: string, lease: number) => invoke<FileDocument>('editor_restore', { projectId: project.id, expectedRoot: project.root, path, id, expected, lease }),
   lease: () => invoke<number>('editor_writer_lease'),
   export: (project: Project, path: string, mode: 'file' | 'folder' | 'tree', draft?: string) => invoke<CopyExport>('editor_export', { projectId: project.id, expectedRoot: project.root, path, mode, draft }),
-  mutate: (project: Project, path: string, action: 'file' | 'folder' | 'rename', name: string, lease: number) => invoke<string>('editor_mutate', { projectId: project.id, expectedRoot: project.root, path, action, name, lease }),
+  validateAiFile: (project: Project, path: string, draft: string) => invoke<void>('editor_export', { projectId: project.id, expectedRoot: project.root, path, mode: 'validate', draft }),
+  mutate: (project: Project, path: string, action: 'file' | 'folder' | 'rename', name: string, lease: number, createParents = false) => invoke<string>('editor_mutate', { projectId: project.id, expectedRoot: project.root, path, action, name, lease, createParents }),
   reveal: (project: Project, path: string, directory: boolean) => invoke<void>('editor_reveal', { projectId: project.id, expectedRoot: project.root, path, directory }),
   list: (project: Project, path: string) => invoke<FileEntry[]>('editor_list', { projectId: project.id, expectedRoot: project.root, path }),
   read: (project: Project, path: string) => invoke<FileDocument>('editor_read', { projectId: project.id, expectedRoot: project.root, path }),

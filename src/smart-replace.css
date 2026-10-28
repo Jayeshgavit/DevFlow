@@ -1,0 +1,14 @@
+.qe-smart { width: min(960px, calc(100vw - 32px)); max-width: 960px; max-height: calc(100dvh - 32px); overflow: auto; }
+.qe-smart h2 { font-size: 18px; }
+.qe-smart p { overflow-wrap: anywhere; }
+.qe-smart label { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-block: 12px; }
+.qe-smart input:not([type=checkbox]), .qe-smart select { min-width: 0; max-width: 100%; flex: 1; padding: 7px; background: var(--surface); color: var(--text); border: 1px solid var(--border-soft); border-radius: 6px; }
+.qe-smart-target { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.qe-smart-target label { flex: 1 1 260px; }
+.qe-smart pre { max-height: 42vh; overflow: auto; background: var(--surface); border: 1px solid var(--border-soft); padding: 12px; font-family: 'JetBrains Mono', monospace; font-size: 12px; tab-size: 4; }
+.qe-smart-diff span { display: block; min-height: 1em; white-space: pre; }
+.qe-smart-add { color: var(--success); background: color-mix(in srgb, var(--success) 10%, transparent); }
+.qe-smart-remove { color: var(--danger); background: color-mix(in srgb, var(--danger) 10%, transparent); }
+.qe-smart-warning { border-left: 3px solid var(--danger); padding-left: 10px; }
+.qe-smart summary { cursor: pointer; padding-block: 8px; }
+@media (max-width: 600px) { .qe-smart { padding: 16px; } .qe-smart .dialog-actions { flex-wrap: wrap; } }

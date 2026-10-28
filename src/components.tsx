@@ -1,14 +1,16 @@
 import React, { useDeferredValue, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
+import { open } from '@tauri-apps/plugin-dialog';
 import { Activity, ArrowRight, Check, ChevronDown, Clipboard, Code2, Copy, Cpu, Download, FolderClosed, FolderOpen, FolderPlus, LayoutDashboard, PanelLeftClose, PanelLeftOpen, Moon, Pause, Pencil, Play, Plus, RotateCcw, Search, Settings2, ShieldCheck, Square, Sun, Terminal, Trash2, X } from 'lucide-react';
 import type { HealthSnapshot, Project, RunOption, Service, ServiceHealthConfig, Theme, View } from './types';
 import type { BulkResult } from './bulk-actions';
-import { buildAiDebugPrompt, errorContext, logCopyGroups, type LogCopyKind, parseErrorLocation, findLoopbackUrls, formatEntry, groupLogs, parseHttp, redactForSharing, serviceGroup, summarizeGroups } from './log-utils';
+import { buildAiDebugPrompt, buildServiceOptions, errorContext, logCopyGroups, type LogCopyKind, parseErrorLocation, findLoopbackUrls, formatEntry, groupLogs, parseHttp, redactForSharing, remapServiceFilter, serviceGroup, summarizeGroups } from './log-utils';
 import { openErrorLocation, verifyErrorLocation } from './log-actions';
 import type { AnsiSpan, LogCategory, LogEntry, LogGroup } from './log-utils';
 import { MAX_PROJECT_LOGS, MAX_SERVICE_LOGS, MAX_SESSION_LOGS } from './log-utils';
 import { LogViewport } from './log-viewport';
 import { useMenuDismissal } from './menu-dismissal';
+import { serviceEndpoint } from './api-tester-state';
 
 type ButtonProps = React.ButtonHTMLAttributes<HTMLButtonElement> & { tone?: 'primary' | 'secondary' | 'quiet' | 'danger'; icon?: React.ReactNode };
 export const Button = React.forwardRef<HTMLButtonElement, ButtonProps>(function Button({ tone = 'secondary', icon, children, className = '', ...props }, ref) {
@@ -28,7 +30,10 @@ export function Status({ running, starting, stopping, outcome, error }: { runnin
 const navigation: { id: View; label: string; icon: React.ReactNode }[] = [
   { id: 'overview', label: 'Overview', icon: <LayoutDashboard size={18} /> },
   { id: 'projects', label: 'Projects', icon: <FolderClosed size={18} /> },
+  { id: 'ports', label: 'Port Manager', icon: <Terminal size={18} /> },
+  { id: 'environment', label: 'Developer Environment', icon: <Terminal size={18} /> },
   { id: 'logs', label: 'Logs', icon: <Terminal size={18} /> },
+  { id: 'api', label: 'API Tester', icon: <ArrowRight size={18} /> },
   { id: 'editor', label: 'Quick Editor', icon: <Code2 size={18} /> },
   { id: 'system', label: 'System Monitor', icon: <Cpu size={18} /> },
   { id: 'maintenance', label: 'Maintenance', icon: <ShieldCheck size={18} /> },
@@ -143,10 +148,10 @@ export function FloatingMenu({ label, icon, triggerClassName = 'button button-se
       window.removeEventListener('scroll', update, true);
     };
   }, [open, align]);
-  return <div className="floating-menu-anchor"><button ref={trigger} type="button" className={triggerClassName} aria-haspopup={panelRole} aria-expanded={open} onPointerDown={() => { if (!open) beforeOpen?.(); }} onClick={event => { if (!open && event.detail === 0) beforeOpen?.(); setOpen(value => !value); }}>{icon}{label}<ChevronDown size={13} /></button>{open && createPortal(<div ref={panel} className="floating-menu-panel" role={panelRole} aria-label={label} style={{ top: position.top, left: position.left, maxHeight: position.maxHeight }} onClickCapture={event => {
+  return <div className="floating-menu-anchor"><button ref={trigger} type="button" className={triggerClassName} aria-haspopup={panelRole} aria-expanded={open} onPointerDown={() => { if (!open) beforeOpen?.(); }} onClick={event => { if (!open && event.detail === 0) beforeOpen?.(); setOpen(value => !value); }}>{icon}{label}<ChevronDown size={13} /></button>{open && createPortal(<div ref={panel} className="floating-menu-panel" role={panelRole} aria-label={label} style={{ top: position.top, left: position.left, maxHeight: position.maxHeight }} onClick={event => {
     if (!autoClose || panelRole !== 'menu' || !(event.target instanceof Element)) return;
     const item = event.target.closest<HTMLButtonElement>('button[role="menuitem"]');
-    if (item && !item.disabled) { close(); trigger.current?.focus({ preventScroll: true }); }
+    if (item && !item.disabled) close();
   }}>{children(finish)}</div>, document.body)}</div>;
 }
 
@@ -162,10 +167,10 @@ export function ProjectShortcuts({ project, onTerminal, onFolder, onCopyPath, on
     const title = isTerminal ? 'Open Terminal' : isFolder ? 'Open Folder' : 'Copy path';
     const icon = isTerminal ? <Terminal size={15} /> : isFolder ? <FolderOpen size={15} /> : <Clipboard size={15} />;
     return <FloatingMenu key={kind} label={title} icon={icon}>{close => destinations.map(destination => <button key={destination.id} role="menuitem" title={destination.path} onClick={() => {
-        close();
         if (isTerminal) void onTerminal(destination.path);
         else if (isFolder) void onFolder(destination.path);
         else void onCopyPath(destination.path).then(success => { if (success) { setCopied(destination.id); window.setTimeout(() => setCopied(''), 1400); } });
+        close();
       }}>{isFolder ? <FolderOpen size={14} /> : null}<span>{destination.name}</span>{kind === 'copy' && (copied === destination.id ? <Check size={14} /> : <Copy size={13} />)}</button>)}</FloatingMenu>;
   };
   const aiMenu = (cli: 'codex' | 'claude') => {
@@ -173,7 +178,7 @@ export function ProjectShortcuts({ project, onTerminal, onFolder, onCopyPath, on
     return (
       <FloatingMenu key={cli} label={label} icon={<Cpu size={15} />}>
         {close => destinations.map(destination => (
-          <button key={destination.id} role="menuitem" title={destination.path} onClick={() => { close(); void onAiCli(destination.path, cli); }}>
+          <button key={destination.id} role="menuitem" title={destination.path} onClick={() => { void onAiCli(destination.path, cli); close(); }}>
             <Terminal size={14} /><span>{destination.name}</span>
           </button>
         ))}
@@ -200,9 +205,10 @@ function ServiceRowBase({ service, running, starting = false, stopping = false, 
 }
 
 type ServiceRowBaseProps = React.ComponentProps<typeof ServiceRowBase>;
-export function ServiceRow(props: ServiceRowBaseProps & { health?: HealthSnapshot; healthConfig?: ServiceHealthConfig; onHealthChange?: (changes: Partial<ServiceHealthConfig>) => void; onCheckNow?: () => void }) {
+export function ServiceRow(props: ServiceRowBaseProps & { health?: HealthSnapshot; healthConfig?: ServiceHealthConfig; onHealthChange?: (changes: Partial<ServiceHealthConfig>) => void; onCheckNow?: () => void; onOpenApi?: (url: string) => void }) {
   const { health, healthConfig, onHealthChange, onCheckNow, service, running, starting = false, stopping = false, busy = false } = props;
-  return <><ServiceRowBase {...props} /><ServiceHealthPanel service={service} running={running} locked={busy || starting || stopping} config={healthConfig || { enabled: false, host: service.host || '127.0.0.1', port: service.port, path: '/', intervalSeconds: 10, timeoutSeconds: 2, expectedStatusMin: 200, expectedStatusMax: 399 }} health={health} onChange={onHealthChange || (() => {})} onCheckNow={onCheckNow || (() => {})} /></>;
+  const apiUrl = serviceEndpoint(service);
+  return <><ServiceRowBase {...props} />{props.onOpenApi && apiUrl && <div className="service-api-shortcut"><Button tone="quiet" title={apiUrl} onClick={() => props.onOpenApi?.(apiUrl)}>Open in API Tester <ArrowRight size={14} /></Button></div>}<ServiceHealthPanel service={service} running={running} locked={busy || starting || stopping} config={healthConfig || { enabled: false, host: service.host || '127.0.0.1', port: service.port, path: '/', intervalSeconds: 10, timeoutSeconds: 2, expectedStatusMin: 200, expectedStatusMax: 399 }} health={health} onChange={onHealthChange || (() => {})} onCheckNow={onCheckNow || (() => {})} /></>;
 }
 
 type CategoryFilter = 'all' | LogCategory | 'http';
@@ -279,12 +285,12 @@ function ErrorEditorAction({ project, message }: { project: Project; message: st
   return <>{verified && <button title={`Open in Quick Editor: ${location!.path}:${location!.line}`} aria-label="Open in Quick Editor" onClick={() => { void openErrorLocation(project, location!).then(() => setError('')).catch(cause => setError(String(cause))); }}><Code2 size={14} /></button>}{error && <span role="alert">{error}</span>}</>;
 }
 
-export function LogViewer({ focusIncident, project, logs, filter, setFilter, search, setSearch, searchRef, autoScroll, setAutoScroll, onCopy, onExport, onClear, onOpenUrl, actionMessage, serviceControls }: {
+export function LogViewer({ focusIncident, project, logs, filter, setFilter, search, setSearch, searchRef, autoScroll, setAutoScroll, onCopy, onExport, onClear, onOpenUrl, actionMessage, serviceControls, onAttachLogs, onCheckedLogsChange }: {
   focusIncident?: { incidentId: string; request: number };
   project: Project; logs: LogEntry[]; filter: string; setFilter: (value: string) => void; search: string; setSearch: (value: string) => void;
   searchRef?: React.RefObject<HTMLInputElement>;
   serviceControls?: React.ReactNode;
-  autoScroll: boolean; setAutoScroll: (value: boolean) => void; onCopy: (text: string, message: string) => Promise<boolean>; onExport: (text: string) => Promise<boolean>; onClear: (entries: LogEntry[]) => void; onOpenUrl: (url: string) => void; actionMessage: string;
+  autoScroll: boolean; setAutoScroll: (value: boolean) => void; onCopy: (text: string, message: string) => Promise<boolean>; onExport: (text: string) => Promise<boolean>; onClear: (entries: LogEntry[]) => void; onOpenUrl: (url: string) => void; actionMessage: string; onAttachLogs?: (entries: LogEntry[], label: string) => void; onCheckedLogsChange?: (entries: LogEntry[]) => void;
 }) {
   const [categoryFilter, setCategoryFilter] = useState<CategoryFilter>('all');
   const [slowMs, setSlowMs] = useState(1000);
@@ -348,10 +354,37 @@ export function LogViewer({ focusIncident, project, logs, filter, setFilter, sea
     const entry = [...logs].reverse().find(line => line.incidentId === focusIncident.incidentId);
     setActiveIssue(entry || null);
   }, [focusIncident, deferredSearch]);
-  const projectEntries = useMemo(() => logs.filter(entry => entry.projectId === project.id || (!entry.projectId && !!entry.incidentId)), [logs, project.id]);
+  const projectEntries = useMemo(() => project.id ? logs.filter(entry => entry.projectId === project.id || (!entry.projectId && !!entry.incidentId)) : [], [logs, project.id]);
   const groups = useMemo(() => groupLogs(projectEntries), [projectEntries]);
-  const serviceNames = useMemo(() => new Map(project.services.map(service => [service.id, service.name])), [project.services]);
-  const serviceScoped = useMemo(() => groups.filter(group => (filter === 'all' || group.entries[0].serviceId === filter || (filter.startsWith('role:') && project.services.some(service => service.id === group.entries[0].serviceId && serviceGroup(service) === filter.slice(5)))) && (streamFilter === 'all' || group.entries[0].stream === streamFilter)), [groups, filter, streamFilter, project.services]);
+  const uniqueServices = useMemo(() => {
+    const seen = new Set<string>();
+    const list: Service[] = [];
+    for (const service of project.services) {
+      if (service.id && !seen.has(service.id)) {
+        seen.add(service.id);
+        list.push(service);
+      }
+    }
+    return list;
+  }, [project.services]);
+  useEffect(() => {
+    const next = remapServiceFilter(filter, uniqueServices);
+    if (next !== filter) {
+      setFilter(next);
+    }
+  }, [project.id, uniqueServices, filter, setFilter]);
+  const serviceOptions = useMemo(() => buildServiceOptions(uniqueServices), [uniqueServices]);
+  const serviceNames = useMemo(() => new Map(uniqueServices.map(service => [service.id, service.name])), [uniqueServices]);
+  const serviceScoped = useMemo(() => groups.filter(group => {
+    const serviceId = group.entries[0]?.serviceId;
+    const stream = group.entries[0]?.stream;
+    const matchesFilter = filter === 'all'
+      || serviceId === filter
+      || (filter === 'role:frontend' && uniqueServices.some(service => service.id === serviceId && serviceGroup(service) === 'frontend'))
+      || (filter === 'role:backend' && uniqueServices.some(service => service.id === serviceId && serviceGroup(service) === 'backend'));
+    const matchesStream = streamFilter === 'all' || stream === streamFilter;
+    return matchesFilter && matchesStream;
+  }), [groups, filter, streamFilter, uniqueServices]);
   const searched = useMemo(() => {
     const query = deferredSearch.trim().toLocaleLowerCase();
     return serviceScoped.filter(group => !query || group.searchText.includes(query) || (serviceNames.get(group.entries[0].serviceId) || '').toLocaleLowerCase().includes(query));
@@ -391,7 +424,8 @@ export function LogViewer({ focusIncident, project, logs, filter, setFilter, sea
   const selectionFor = (kind: LogCopyKind) => logCopyGroups(project, groups, filtered, kind);
   const filteredEntries = useMemo(() => filtered.flatMap(group => group.entries), [filtered]);
   const formatEntries = (entries: LogEntry[]) => entries.map(entry => redactForSharing(formatEntry(entry, serviceNames.get(entry.serviceId) || entry.serviceId))).join('\n');
-  const checkedEntries = filteredEntries.filter(entry => selectedRows.has(entry));
+  const checkedEntries = useMemo(() => filteredEntries.filter(entry => selectedRows.has(entry)), [filteredEntries, selectedRows]);
+  useEffect(() => { onCheckedLogsChange?.(checkedEntries); }, [checkedEntries, onCheckedLogsChange]);
   const serviceEntries = serviceScoped.flatMap(group => group.entries);
   const viewportGroups = visibleGroups.filter(group => filtered.includes(group));
   const viewportErrors = viewportGroups.filter(group => group.category === 'error');
@@ -425,7 +459,7 @@ export function LogViewer({ focusIncident, project, logs, filter, setFilter, sea
   }}><Card className={`log-panel developer-console${showTime ? '' : ' hide-log-time'}${showService ? '' : ' hide-log-service'}`}>
     {serviceControls}
     <div className="console-toolbar" aria-label="Console controls">
-      <label className="console-service"><span className="sr-only">Service log filter</span><select value={filter} onChange={event => { setAutoScroll(false); setActiveIssue(null); setFilter(event.target.value); }}><option value="all">Combined services</option><option value="role:frontend">Frontend</option><option value="role:backend">Backend</option>{project.services.map(service => <option key={service.id} value={service.id}>{service.name}</option>)}</select></label>
+      <label className="console-service"><span className="sr-only">Service log filter</span><select value={filter} onChange={event => { setAutoScroll(false); setActiveIssue(null); setFilter(event.target.value); }}>{serviceOptions.map(option => <option key={option.value} value={option.value}>{option.label}</option>)}</select></label>
       <label className="search-field console-search"><Search size={15} /><span className="sr-only">Search logs</span><input ref={inputRef} value={search} onChange={event => { setAutoScroll(false); setActiveIssue(null); setSearch(event.target.value); }} placeholder="Search output…" aria-keyshortcuts="Control+f" /><kbd>Ctrl F</kbd></label>
       <Button tone="quiet" aria-label={autoScroll ? 'Pause following output' : 'Follow latest output'} aria-pressed={autoScroll} icon={autoScroll ? <Pause size={14} /> : <Play size={14} />} onClick={() => { setActiveIssue(null); setAutoScroll(!autoScroll); }}>{autoScroll ? 'Pause' : 'Follow'}</Button>
       <FloatingMenu label="Options" icon={<Settings2 size={15} />} triggerClassName="button button-quiet" align="end" panelRole="dialog">{close => <div className="console-options">
@@ -440,11 +474,13 @@ export function LogViewer({ focusIncident, project, logs, filter, setFilter, sea
       <FloatingMenu label="Copy" icon={<Clipboard size={15} />} triggerClassName="button button-quiet" align="end" autoClose={false} beforeOpen={() => setSelectionSnapshot(selection)}>{close => <>
         <button role="menuitem" disabled={actionBusy || !selectionSnapshot} onClick={() => void complete(() => onCopy(redactForSharing(selectionSnapshot), 'Selection copied'), close)}>Copy selection</button>
         <button role="menuitem" disabled={actionBusy || !checkedEntries.length} onClick={() => void complete(() => onCopy(formatEntries(checkedEntries), 'Selected lines copied'), close)}>Copy selected lines<span>{checkedEntries.length}</span></button>
+        {onAttachLogs && <button role="menuitem" disabled={actionBusy || !checkedEntries.length} onClick={() => { close(); onAttachLogs(checkedEntries.slice(0, 100), `Selected logs · ${Math.min(checkedEntries.length, 100)} entries`); }}>Attach selected logs to AI<span>{Math.min(checkedEntries.length, 100)} entries</span></button>}
         <button role="menuitem" disabled={actionBusy || !viewportGroups.length} onClick={() => void complete(() => copy(viewportGroups, 'Visible output copied'), close)}>Copy visible output</button>
         {([['all', 'All combined logs'], ['frontend', 'Frontend logs'], ['backend', 'Backend logs'], ['errors', 'All errors'], ['frontend-errors', 'Frontend errors'], ['backend-errors', 'Backend errors'], ['current', 'Current filtered view']] as const).map(([kind, label]) => <button key={kind} role="menuitem" disabled={actionBusy || !selectionFor(kind).length} onClick={() => void complete(() => copy(selectionFor(kind), `${label} copied`), close)}>{label}<span>{selectionFor(kind).flatMap(group => group.entries).length}</span></button>)}
         <button role="menuitem" disabled={actionBusy || !viewportErrors.length} onClick={() => void complete(() => copy(viewportErrors, 'Visible errors copied'), close)}>Visible errors<span>{viewportErrors.flatMap(group => group.entries).length}</span></button>
         <button role="menuitem" disabled={actionBusy || !viewportWarnings.length} onClick={() => void complete(() => copy(viewportWarnings, 'Visible warnings copied'), close)}>Visible warnings<span>{viewportWarnings.flatMap(group => group.entries).length}</span></button>
         <button role="menuitem" disabled={actionBusy || !visibleErrors.length} onClick={() => void complete(() => copy(visibleErrors, 'Errors with context copied', true), close)}>Errors with nearby context<span>up to 200 lines</span></button>
+        {onAttachLogs && <button role="menuitem" disabled={actionBusy || !visibleErrors.length} onClick={() => { close(); const errors = visibleErrors.flatMap(group => group.entries); const context = errorContext(projectEntries, errors, 100); onAttachLogs(context, `Recent errors with context · ${context.length} entries`); }}>Attach recent errors with context<span>up to 100 entries</span></button>}
         <button role="menuitem" disabled={actionBusy || !filtered.length} onClick={() => void complete(copyPrompt, close)}>Copy as AI Debug Prompt<span>best effort masking</span></button>
       </>}</FloatingMenu>
       <FloatingMenu label="More" icon={<ChevronDown size={15} />} triggerClassName="button button-quiet" align="end" autoClose={false}>{close => <>
@@ -555,15 +591,24 @@ function friendlyWindowsPath(value: string) {
 export function AddServiceDialog({ candidates, projectRoot, onAdd, onSuggest, onCancel }: {
   candidates: Service[];
   projectRoot: string;
-  onAdd: (service: Service) => void;
+  onAdd: (service: Service) => Promise<void>;
   onSuggest: (cwd: string, framework: string) => Promise<Service | null>;
   onCancel: () => void;
 }) {
+  const manualService = (cwd: string, framework = 'Custom'): Service => ({
+    id: '', name: 'New service', cwd, program: '', args: [], framework,
+    role: roleForFramework(framework), reviewNote: 'Manual service. Review the command before starting.',
+  });
   const [selectedKey, setSelectedKey] = useState(candidates[0]?.id || 'manual');
-  const selected = candidates.find(candidate => candidate.id === selectedKey);
-  const [framework, setFramework] = useState(selected?.framework || 'Custom');
-  const [suggestion, setSuggestion] = useState<Service | null>(null);
+  const [preview, setPreview] = useState<Service>(() => candidates[0] || manualService(projectRoot));
   const [suggesting, setSuggesting] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [picking, setPicking] = useState(false);
+  const [error, setError] = useState('');
+  const [source, setSource] = useState(candidates[0] ? 'Detected recommendation. Review before adding.' : 'Manual values. Command has not been verified.');
+  const request = useRef(0);
+  useEffect(() => () => { request.current += 1; }, []);
+  const framework = preview.framework || 'Custom';
   const dialogRef = useRef<HTMLDivElement>(null);
   const cancelRef = useRef<HTMLButtonElement>(null);
   useEffect(() => {
@@ -572,7 +617,7 @@ export function AddServiceDialog({ candidates, projectRoot, onAdd, onSuggest, on
     const handler = (event: KeyboardEvent) => {
       if (event.key === 'Escape') onCancel();
       if (event.key !== 'Tab' || !dialogRef.current) return;
-      const controls = [...dialogRef.current.querySelectorAll<HTMLElement>('button:not(:disabled), select:not(:disabled)')];
+      const controls = [...dialogRef.current.querySelectorAll<HTMLElement>('button:not(:disabled), select:not(:disabled), input:not(:disabled), textarea:not(:disabled)')];
       if (event.shiftKey && document.activeElement === controls[0]) { event.preventDefault(); controls[controls.length - 1]?.focus(); }
       else if (!event.shiftKey && document.activeElement === controls[controls.length - 1]) { event.preventDefault(); controls[0]?.focus(); }
     };
@@ -580,44 +625,74 @@ export function AddServiceDialog({ candidates, projectRoot, onAdd, onSuggest, on
     return () => { window.removeEventListener('keydown', handler); previous?.focus(); };
   }, [onCancel]);
   const selectCandidate = (key: string) => {
-    const candidate = candidates.find(item => item.id === key);
+    request.current += 1;
+    setSuggesting(false);
     setSelectedKey(key);
-    setFramework(candidate?.framework || 'Custom');
-    setSuggestion(null);
+    setPreview(candidates.find(item => item.id === key) || manualService(projectRoot));
+    setSource(key === 'manual' ? 'Manual values. Command has not been verified.' : 'Detected recommendation. Review before adding.');
+    setError('');
   };
-  useEffect(() => {
-    let disposed = false;
-    if (!['FastAPI', 'Flask', 'Django'].includes(framework)) { setSuggestion(null); return () => { disposed = true; }; }
+  const detectDirectory = async (cwd: string, chosenFramework = 'Auto') => {
+    const generation = ++request.current;
+    setSelectedKey('manual');
     setSuggesting(true);
-    void onSuggest(selected?.cwd || projectRoot, framework).then(value => { if (!disposed) setSuggestion(value); }).catch(() => { if (!disposed) setSuggestion(null); }).finally(() => { if (!disposed) setSuggesting(false); });
-    return () => { disposed = true; };
-  }, [framework, onSuggest, projectRoot, selected?.cwd]);
-  const sameFramework = selected?.framework === framework;
-  const suggested = suggestion?.framework === framework ? suggestion : null;
-  const preview = selected ? {
-    ...selected,
-    framework,
-    role: roleForFramework(framework, selected.role || 'other'),
-    program: suggested?.program || (sameFramework ? selected.program : ''),
-    args: suggested?.args.length ? suggested.args : (sameFramework ? selected.args : []),
-    port: suggested?.port ?? (sameFramework ? selected.port : undefined),
-    host: suggested?.host ?? (sameFramework ? selected.host : undefined),
-    interpreterPath: suggested?.interpreterPath || selected.interpreterPath,
-    entryPoint: suggested?.entryPoint || selected.entryPoint,
-    confidence: suggested?.confidence || selected.confidence,
-    reviewNote: suggested?.reviewNote || selected.reviewNote,
-  } : suggested || { id: '', name: 'New service', cwd: projectRoot, program: '', args: [], role: roleForFramework(framework), framework, host: undefined, port: undefined };
-  const uncertain = !selected || Boolean(selected.reviewNote) || !selected.program.trim();
-  const commit = () => {
-    const service: Service = selected ? {
-      ...preview,
-      reviewNote: sameFramework ? selected.reviewNote : 'Framework selected manually. Enter and review a verified command before starting.',
-    } : {
-      ...preview,
-      id: `service-${crypto.randomUUID()}`,
-      reviewNote: 'Manual service. Enter and review its working directory and command before starting.',
-    };
-    onAdd(service);
+    setError('');
+    const manual = manualService(cwd, chosenFramework === 'Auto' ? 'Custom' : chosenFramework);
+    if (chosenFramework !== 'Auto') manual.reviewNote = 'Manual override: framework. Review the command before starting.';
+    setPreview(manual);
+    setSource('Inspecting selected directory…');
+    try {
+      const detected = await onSuggest(cwd, chosenFramework);
+      if (generation !== request.current) return;
+      if (detected && (chosenFramework === 'Auto' || detected.framework === chosenFramework)) {
+        setPreview({ ...detected, cwd, id: '', name: detected.framework ? `${detected.framework} service` : 'New service',
+          reviewNote: chosenFramework === 'Auto' ? detected.reviewNote : `Manual override: framework. ${detected.reviewNote || 'Review the detected command before starting.'}` });
+        setSource('Detected recommendation for the selected directory. Review before adding.');
+      } else {
+        setSource('No matching framework command detected. Enter a manual command; it is not verified.');
+      }
+    } catch (cause) {
+      if (generation === request.current) { setError(String(cause)); setSource('Directory inspection failed. Choose an accessible folder.'); }
+    } finally { if (generation === request.current) setSuggesting(false); }
   };
-  return <div className="dialog-backdrop" onMouseDown={event => { if (event.target === event.currentTarget) onCancel(); }}><div ref={dialogRef} className="dialog add-service-dialog" role="dialog" aria-modal="true" aria-labelledby="add-service-title"><button className="dialog-close icon-button" aria-label="Close dialog" onClick={onCancel}><X size={18} /></button><div className="dialog-symbol"><FolderPlus size={22} /></div><h2 id="add-service-title">Add service</h2><p>Choose a discovered service or add a manual configuration. Nothing starts automatically.</p>{!candidates.length && <p className="add-service-empty" role="status">No unconfigured discovered services were found. You can still add a manual service.</p>}<div className="service-candidates" role="list">{candidates.map(candidate => <button key={candidate.id} type="button" role="listitem" className={`service-candidate${selectedKey === candidate.id ? ' is-selected' : ''}`} onClick={() => selectCandidate(candidate.id)}><span><strong>{candidate.name}</strong><small>{candidate.reviewNote ? 'Suggested · review required' : 'Detected'}</small></span><span>{candidate.role || 'other'} · {candidate.framework || 'Unknown'}</span><code>{candidate.cwd}</code></button>)}<button type="button" role="listitem" className={`service-candidate${selectedKey === 'manual' ? ' is-selected' : ''}`} onClick={() => selectCandidate('manual')}><span><strong>Manual / custom service</strong><small>Manual</small></span><span>Other · Custom</span><code>Start from the project root and edit every field</code></button></div>{uncertain ? <label className="add-service-framework">FRAMEWORK<select value={framework} onChange={event => { setFramework(event.target.value); setSuggestion(null); }}>{framework && !serviceFrameworks.includes(framework as typeof serviceFrameworks[number]) && <option>{framework}</option>}{serviceFrameworks.map(option => <option key={option}>{option}</option>)}</select><small>{suggesting ? 'Inspecting the working directory for a verified command…' : 'Framework selection re-runs bounded discovery and only applies verified interpreter/entry-point suggestions.'}</small></label> : <div className="add-service-detected">Detected framework: <strong>{framework}</strong></div>}<dl className="service-preview"><div><dt>Role</dt><dd>{preview.role || 'other'}</dd></div><div><dt>Framework</dt><dd>{preview.framework || 'Custom'}</dd></div><div><dt>Working directory</dt><dd>{preview.cwd}</dd></div><div><dt>Executable</dt><dd>{preview.program || 'Requires review'}</dd></div><div><dt>Arguments</dt><dd>{preview.args.length ? preview.args.join(' ') : 'None detected'}</dd></div><div><dt>ASGI target</dt><dd>{preview.entryPoint || 'Not verified'}</dd></div><div><dt>Interpreter</dt><dd>{preview.interpreterPath || 'Not found'}</dd></div><div><dt>Confidence</dt><dd>{preview.confidence || 'Not assessed'}</dd></div><div><dt>Port</dt><dd>{preview.port || 'Not detected'}</dd></div></dl><div className="dialog-actions"><Button ref={cancelRef} onClick={onCancel}>Cancel</Button><Button tone="primary" onClick={commit}>Add service</Button></div></div></div>;
+  const browse = async () => {
+    const generation = request.current;
+    setPicking(true);
+    try {
+      const cwd = await open({ directory: true, multiple: false, title: 'Select service working directory' });
+      if (generation === request.current && cwd && !Array.isArray(cwd)) await detectDirectory(cwd);
+    } catch (cause) { setError(String(cause)); }
+    finally { setPicking(false); }
+  };
+  const editCommand = (field: 'program' | 'args', value: string) => {
+    request.current += 1;
+    setSuggesting(false);
+    setPreview(current => ({ ...current, [field]: field === 'args' ? value.split('\n') : value,
+      runOptions: [], interpreterPath: undefined, entryPoint: undefined, confidence: undefined,
+      port: undefined, host: undefined, reviewNote: current.reviewNote?.startsWith('Manual override: framework')
+        ? 'Manual override: framework. Manual command override. Review before starting.' : 'Manual command override. Review before starting.' }));
+    setSource('Manual values. Command has not been verified.');
+  };
+  const commit = async () => {
+    const generation = ++request.current;
+    setSaving(true);
+    setError('');
+    try {
+      // Custom performs directory validation without recommending or executing a command.
+      await onSuggest(preview.cwd, 'Custom');
+      if (generation !== request.current) return;
+      await onAdd({ ...preview, id: `service-${crypto.randomUUID()}` });
+    } catch (cause) { setError(String(cause)); }
+    finally { setSaving(false); }
+  };
+  return <div className="dialog-backdrop" onMouseDown={event => { if (event.target === event.currentTarget) onCancel(); }}><div ref={dialogRef} className="dialog add-service-dialog" role="dialog" aria-modal="true" aria-labelledby="add-service-title"><button className="dialog-close icon-button" aria-label="Close dialog" onClick={onCancel}><X size={18} /></button><div className="dialog-symbol"><FolderPlus size={22} /></div><h2 id="add-service-title">Add service</h2><p>Choose a discovered service or add a manual configuration. Nothing starts automatically.</p>{!candidates.length && <p className="add-service-empty" role="status">No unconfigured discovered services were found. You can still add a manual service.</p>}<div className="service-candidates" role="list">{candidates.map(candidate => <button key={candidate.id} type="button" role="listitem" className={`service-candidate${selectedKey === candidate.id ? ' is-selected' : ''}`} disabled={picking || suggesting || saving} onClick={() => selectCandidate(candidate.id)}><span><strong>{candidate.name}</strong><small>{candidate.reviewNote ? 'Suggested · review required' : 'Detected'}</small></span><span>{candidate.role || 'other'} · {candidate.framework || 'Unknown'}</span><code>{candidate.cwd}</code></button>)}<button type="button" role="listitem" className={`service-candidate${selectedKey === 'manual' ? ' is-selected' : ''}`} disabled={picking || suggesting || saving} onClick={() => selectCandidate('manual')}><span><strong>Manual / custom service</strong><small>Manual</small></span><span>Other · Custom</span><code>Start from the project root and edit every field</code></button></div><div className="add-service-directory" aria-busy={suggesting}>
+      <strong>Working Directory</strong><code>{friendlyWindowsPath(preview.cwd)}</code>
+      <div className="toolbar-actions"><Button disabled={picking || suggesting || saving} onClick={() => void browse()}>Browse...</Button><Button disabled={picking || suggesting || saving} onClick={() => void detectDirectory(projectRoot)}>Use project root</Button></div>
+      <small>Framework detection inspects this folder. Selecting a folder never runs commands.</small>
+    </div><fieldset className="add-service-fields" disabled={picking || suggesting || saving}>
+      <label className="add-service-framework">FRAMEWORK<select value={framework} onChange={event => void detectDirectory(preview.cwd, event.target.value)}>{framework && !serviceFrameworks.includes(framework as typeof serviceFrameworks[number]) && <option>{framework}</option>}{serviceFrameworks.map(option => <option key={option}>{option}</option>)}</select></label>
+      <p className="add-service-source" role="status">{suggesting ? 'Detecting framework in selected directory…' : source}</p>
+      {preview.reviewNote && <small className="service-detection-note">{preview.reviewNote}</small>}
+      <div className="service-fields"><label>EXECUTABLE<input value={preview.program} onChange={event => editCommand('program', event.target.value)} /></label><label>ARGUMENTS (ONE PER LINE)<textarea rows={3} value={preview.args.join('\n')} onChange={event => editCommand('args', event.target.value)} /></label></div>
+    </fieldset>{error && <p className="add-service-error" role="alert">{error}</p>}<dl className="service-preview"><div><dt>Role</dt><dd>{preview.role || 'other'}</dd></div><div><dt>Framework</dt><dd>{preview.framework || 'Custom'}</dd></div><div><dt>Working directory</dt><dd>{preview.cwd}</dd></div><div><dt>Executable</dt><dd>{preview.program || 'Requires review'}</dd></div><div><dt>Arguments</dt><dd>{preview.args.length ? preview.args.join(' ') : 'None detected'}</dd></div><div><dt>ASGI target</dt><dd>{preview.entryPoint || 'Not verified'}</dd></div><div><dt>Interpreter</dt><dd>{preview.interpreterPath || 'Not found'}</dd></div><div><dt>Confidence</dt><dd>{preview.confidence || 'Not assessed'}</dd></div><div><dt>Port</dt><dd>{preview.port || 'Not detected'}</dd></div></dl><div className="dialog-actions"><Button ref={cancelRef} onClick={onCancel}>Cancel</Button><Button tone="primary" disabled={picking || suggesting || saving} onClick={() => void commit()}>{saving ? 'Saving…' : 'Add service'}</Button></div></div></div>;
 }
