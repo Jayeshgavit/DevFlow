@@ -179,6 +179,7 @@ export function parseHttp(message: string): HttpDetails | null {
   const match = HTTP_LINE.exec(message);
   if (!match || match.index === undefined) return null;
   const [full, method, endpoint, statusText] = match;
+  if (!endpoint.startsWith('/') && !/^https?:\/\//i.test(endpoint)) return null;
   const methodStart = match.index + full.indexOf(method);
   const endpointStart = match.index + full.indexOf(endpoint, methodStart - match.index + method.length);
   const statusStart = match.index + full.lastIndexOf(statusText);
@@ -211,7 +212,7 @@ export function summarizeGroups(groups: LogGroup[]) {
   groups.forEach(group => {
     counts[group.category] += group.entries.length;
     entries += group.entries.length;
-    if (group.http) requests += 1;
+    if (group.http) requests += group.repeatCount;
   });
   return { entries, requests, counts };
 }
@@ -345,9 +346,11 @@ export function formatEntry(entry: LogEntry, serviceName: string): string {
 
 export function redactForSharing(value: string): string {
   return stripAnsi(value)
-    .replace(/\b(https?:\/\/)[^\s/@:]+:[^\s/@]+@/gi, '$1[redacted]@')
-    .replace(/(\b(?:authorization)\s*[:=]\s*bearer\s+)[^\s,;]+/gi, '$1[redacted]')
-    .replace(/(\b(?:[A-Z0-9_]*(?:API[_-]?KEY|ACCESS[_-]?TOKEN|REFRESH[_-]?TOKEN|PASSWORD|PASSWD|SECRET|CREDENTIAL|AUTH_TOKEN)|api[_-]?key|access[_-]?token|refresh[_-]?token|password|passwd|secret|token)\s*[:=]\s*)("[^"]*"|'[^']*'|[^\s,;]+)/gi, '$1[redacted]')
+    .replace(/[\u007f-\u009f\u202a-\u202e\u2066-\u2069]/g, character => '\\u' + character.charCodeAt(0).toString(16).padStart(4, '0'))
+    .replace(/\b([a-z][a-z0-9+.-]*:\/\/)[^\s/@:]+:[^\s/@]+@/gi, '$1[redacted]@')
+    .replace(/(\b(?:authorization)["']?\s*[:=]\s*["']?)(?:bearer|basic)\s+[^\s,;"']+/gi, '$1[redacted]')
+    .replace(/(\b(?:cookie|set-cookie)["']?\s*[:=]\s*)(?:"[^"]*"|'[^']*'|[^\r\n]+)/gi, '$1[redacted]')
+    .replace(/(\b(?:[A-Z0-9_]*(?:API[_-]?KEY|ACCESS[_-]?TOKEN|REFRESH[_-]?TOKEN|PASSWORD|PASSWD|SECRET|CREDENTIAL|AUTH_TOKEN)|api[_-]?key|access[_-]?token|refresh[_-]?token|password|passwd|secret|token)["']?\s*[:=]\s*)("[^"]*"|'[^']*'|(?!\[redacted\])[^\s,;&"'\]}]+)/gi, '$1[redacted]')
     .replace(/(--(?:api-key|access-token|refresh-token|password|passwd|secret|token)(?:=|\s+))("[^"]*"|'[^']*'|[^\s,;]+)/gi, '$1[redacted]');
 }
 export const redactForAiPrompt = redactForSharing;

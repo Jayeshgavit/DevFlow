@@ -1,6 +1,8 @@
+import { editorShortcut } from './shortcuts';
+import type { EditorViewPosition } from './editor-session';
 import { readEditorPreferences, saveEditorPreferences } from './editor-preferences';
-import React, { forwardRef, useEffect, useImperativeHandle, useRef } from 'react';
-import { Compartment, EditorState, type Range } from '@codemirror/state';
+import React, { forwardRef, useEffect, useLayoutEffect, useImperativeHandle, useRef } from 'react';
+import { Annotation, Compartment, EditorSelection, EditorState, Prec, type Range } from '@codemirror/state';
 import { EditorView, Decoration, ViewPlugin, drawSelection, highlightActiveLine, highlightActiveLineGutter, keymap, lineNumbers } from '@codemirror/view';
 import { defaultKeymap, history, historyKeymap, indentWithTab, undo, redo, selectAll } from '@codemirror/commands';
 import { indentUnit, bracketMatching, defaultHighlightStyle, foldGutter, foldKeymap, foldable, indentOnInput, syntaxHighlighting, syntaxTree, HighlightStyle } from '@codemirror/language';
@@ -9,6 +11,7 @@ import { tags } from '@lezer/highlight';
 import { extension, type CodeSlice } from './editor-api';
 
 export type EditorHandle = {
+  position: () => EditorViewPosition | undefined;
   selectionRange: () => { from: number; to: number } | undefined;
   replaceRange: (expected: string, from: number, to: number, insertion: string) => boolean;
   slice: (kind: 'selection' | 'lines' | 'section' | 'all') => CodeSlice;
@@ -18,7 +21,8 @@ export type EditorHandle = {
   clipboard: (action: 'cut' | 'copy' | 'paste') => Promise<void>;
   selectAll: () => void;
 };
-type Props = { content: string; path: string; editing: boolean; line?: number; onChange: (text: string) => void; onSelection: (from: number, to: number, selected: boolean) => void; onSave: () => void; onContextMenu: (event: React.MouseEvent) => void };
+type Props = { syncRevision?: number; position?: EditorViewPosition; content: string; path: string; editing: boolean; line?: number; column?: number; onChange: (text: string) => void; onSelection: (from: number, to: number, selected: boolean) => void; onSave: () => void; onContextMenu: (event: React.MouseEvent) => void };
+const diskSynchronization = Annotation.define<boolean>();
 
 async function language(path: string) {
   switch (extension(path)) {
@@ -77,20 +81,23 @@ export default forwardRef<EditorHandle, Props>(function EditorSurface(props, ref
   const wrapping = useRef(new Compartment());
   const wrapped = useRef(false);
   const preferences = useRef(new Compartment());
+  const undoHistory = useRef(new Compartment());
   useEffect(() => {
     if (!host.current) return;
     let disposed = false;
     const languages = new Compartment();
     const view = new EditorView({ parent: host.current, state: EditorState.create({
       doc: props.content,
+      selection: props.position ? { anchor: Math.min(props.content.length, props.position.anchor), head: Math.min(props.content.length, props.position.head) } : undefined,
       extensions: [
+        Prec.highest(EditorView.domEventHandlers({ keydown: event => editorShortcut(event) })),
         wrapping.current.of([]), preferences.current.of([]), syntaxDiagnostics, foldGutter(), drawSelection(),
-        history(), indentOnInput(), search(), syntaxHighlighting(defaultHighlightStyle, { fallback: true }), syntaxHighlighting(highlighting),
+        undoHistory.current.of(history()), indentOnInput(), search(), syntaxHighlighting(defaultHighlightStyle, { fallback: true }), syntaxHighlighting(highlighting),
         editable.current.of([EditorState.readOnly.of(!props.editing)]), languages.of([]),
         EditorView.contentAttributes.of({ 'aria-label': 'File contents', spellcheck: 'false' }),
         keymap.of([{ key: 'Mod-s', run: () => { callbacks.current.onSave(); return true; } }, { key: 'Mod-h', run: openSearchPanel }, ...searchKeymap, ...foldKeymap, ...historyKeymap, ...defaultKeymap, indentWithTab]),
         EditorView.updateListener.of(update => {
-          if (update.docChanged) callbacks.current.onChange(update.state.doc.toString());
+          if (update.docChanged && !update.transactions.some(transaction => transaction.annotation(diskSynchronization))) callbacks.current.onChange(update.state.doc.toString());
           if (update.selectionSet || update.docChanged) {
             const range = update.state.selection.main;
             callbacks.current.onSelection(update.state.doc.lineAt(range.from).number, update.state.doc.lineAt(range.empty ? range.to : Math.max(range.from, range.to - 1)).number, !range.empty);
@@ -99,9 +106,22 @@ export default forwardRef<EditorHandle, Props>(function EditorSurface(props, ref
       ],
     }) });
     editor.current = view;
+    const frame = requestAnimationFrame(() => { if (props.position) { view.scrollDOM.scrollTop = props.position.top; view.scrollDOM.scrollLeft = props.position.left; } });
     language(props.path).then(value => { if (!disposed) view.dispatch({ effects: languages.reconfigure(value) }); }).catch(() => { /* Plain text remains usable if language loading fails. */ });
-    return () => { disposed = true; editor.current = undefined; view.destroy(); };
+    return () => { disposed = true; cancelAnimationFrame(frame); editor.current = undefined; view.destroy(); };
   }, []);
+  useLayoutEffect(() => {
+    const view = editor.current;
+    if (!view || view.state.doc.toString() === props.content) return;
+    const top = view.scrollDOM.scrollTop, left = view.scrollDOM.scrollLeft;
+    const clamp = (position: number) => Math.max(0, Math.min(props.content.length, position));
+    const selection = EditorSelection.create(view.state.selection.ranges.map(range => EditorSelection.range(clamp(range.anchor), clamp(range.head))), view.state.selection.mainIndex);
+    // Remove the history field before replacing disk text. Reusing stale undo
+    // entries across whole-document disk replacement would restore old content.
+    view.dispatch({ effects: undoHistory.current.reconfigure([]) });
+    view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: props.content }, selection, effects: undoHistory.current.reconfigure(history()), annotations: diskSynchronization.of(true) });
+    view.requestMeasure({ read: () => undefined, write: () => { view.scrollDOM.scrollTop = top; view.scrollDOM.scrollLeft = left; } });
+  }, [props.syncRevision]);
   useEffect(() => {
     const apply = () => {
       const view = editor.current; if (!view) return;
@@ -125,10 +145,12 @@ export default forwardRef<EditorHandle, Props>(function EditorSurface(props, ref
   useEffect(() => {
     const view = editor.current;
     if (!view || !props.line) return;
-    const at = view.state.doc.line(Math.min(Math.max(1, props.line), view.state.doc.lines)).from;
+    const line = view.state.doc.line(Math.min(Math.max(1, props.line), view.state.doc.lines));
+    const at = line.from + Array.from(line.text).slice(0, Math.max(0, (props.column || 1) - 1)).join('').length;
     view.dispatch({ selection: { anchor: at }, effects: EditorView.scrollIntoView(at, { y: 'start' }) }); view.focus();
-  }, [props.line]);
+  }, [props.line, props.column]);
   useImperativeHandle(ref, () => ({
+    position: () => { const view = editor.current; return view ? { anchor: view.state.selection.main.anchor, head: view.state.selection.main.head, top: view.scrollDOM.scrollTop, left: view.scrollDOM.scrollLeft } : undefined; },
     selectionRange: () => { const range = editor.current?.state.selection.main; return range && !range.empty ? { from: range.from, to: range.to } : undefined; },
     replaceRange: (expected, from, to, insert) => {
       const view = editor.current;

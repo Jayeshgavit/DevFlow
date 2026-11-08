@@ -954,6 +954,7 @@ pub fn run() {
  tauri::Builder::default().plugin(tauri_plugin_dialog::init()).plugin(tauri_plugin_notification::init()).manage(AppState::default())
  .manage(notifications::DesktopAlerts::default())
  .manage(quick_editor::QuickEditor::default())
+ .manage(quick_editor::search::SearchState::default())
  .manage(editor_window::EditorWindow::default())
  .manage(logs_window::LogsWindows::default())
   .manage(ai_chat::AiChatState::new())
@@ -967,7 +968,10 @@ pub fn run() {
     let _ = window.app_handle().emit_to("main", "api-tester-closing", ());
    }
   }
-  if matches!(event, tauri::WindowEvent::Destroyed) { window.state::<quick_editor::research::ResearchState>().clear(window.label(), None); }
+  if matches!(event, tauri::WindowEvent::Destroyed) {
+   window.state::<quick_editor::research::ResearchState>().clear(window.label(), None);
+   window.state::<quick_editor::search::SearchState>().cancel(window.label(), None);
+  }
   if window.label() == "main" {
    if let tauri::WindowEvent::CloseRequested { api, .. } = event {
     api.prevent_close();
@@ -981,13 +985,15 @@ pub fn run() {
  })
  .setup(|app| { notifications::initialize(app.handle())?; Ok(()) })
  .manage(system_center::SystemCenter::default())
- .invoke_handler(tauri::generate_handler![port_manager::inspect_ports, port_manager::stop_port_service, developer_environment::check_tool, developer_environment::check_project_requirements, api_tester::api_tester_source, api_tester::api_tester_prepare, api_tester::api_tester_send, api_tester::api_tester_cancel, api_tester::api_tester_load, api_tester::api_tester_save, chat_history::chat_storage_location, chat_history::chat_storage_pick, chat_history::chat_storage_apply, chat_history::chat_history_export, chat_history::chat_history_load, chat_history::chat_history_save, quick_editor::snapshots::editor_history, quick_editor::snapshots::editor_snapshot, quick_editor::snapshots::editor_restore, quick_editor::actions::editor_export, quick_editor::actions::editor_mutate, quick_editor::paste_new::editor_create_files, quick_editor::actions::editor_reveal, editor_window::editor_writer_lease, editor_window::editor_window_session, editor_window::editor_float, editor_window::editor_window_ready, editor_window::editor_dock, editor_window::editor_accept_dock, editor_window::editor_recover_opening, quick_editor::editor_list, quick_editor::editor_read, quick_editor::editor_save, notifications::show_desktop_notification, load_projects, save_projects, detect_project, discover_services, suggest_service, check_service_health, start_service, stop_service, running_services, stopping_services, open_directory, open_in_ai_cli,
+ .invoke_handler(tauri::generate_handler![port_manager::inspect_ports, port_manager::stop_port_service, developer_environment::check_tool, developer_environment::check_project_requirements, api_tester::api_tester_source, api_tester::api_tester_prepare, api_tester::api_tester_send, api_tester::api_tester_cancel, api_tester::api_tester_load, api_tester::api_tester_save, chat_history::chat_storage_location, chat_history::chat_storage_pick, chat_history::chat_storage_apply, chat_history::chat_history_export, chat_history::chat_history_load, chat_history::chat_history_save, quick_editor::snapshots::editor_history, quick_editor::snapshots::editor_snapshot, quick_editor::snapshots::editor_restore, quick_editor::actions::editor_export, quick_editor::actions::editor_mutate, quick_editor::paste_new::editor_create_files, quick_editor::actions::editor_reveal, editor_window::editor_writer_lease, editor_window::editor_window_session, editor_window::editor_float, editor_window::editor_window_ready, editor_window::editor_dock, editor_window::editor_accept_dock, editor_window::editor_recover_opening, quick_editor::editor_list, quick_editor::editor_read, quick_editor::watch::editor_watch_files, quick_editor::watch::editor_unwatch_files, quick_editor::editor_save, notifications::show_desktop_notification, load_projects, save_projects, detect_project, discover_services, suggest_service, check_service_health, start_service, stop_service, running_services, stopping_services, open_directory, open_in_ai_cli,
   managed_service_count, shutdown_app, editor_window::editor_close,
+  quick_editor::search::editor_search, quick_editor::search::editor_cancel_search,
+  quick_editor::search::editor_preview_replace,
   logs_window::logs_float, logs_window::logs_project, logs_window::logs_dock, logs_window::logs_pending, logs_window::logs_accept_dock,
   log_actions::logs_copy, log_actions::logs_export, log_actions::logs_verify_location, log_actions::logs_open_location, log_actions::logs_take_location,
   system_center::system_snapshot, system_center::system_end_task, system_center::scan_temp_files, system_center::clean_temp_files, system_center::scan_cleanup, system_center::clean_selected_cleanup,
   system_center::cancel_system_maintenance, system_center::flush_dns_cache, system_center::open_storage_tool, system_center::open_local_url,
-   ai_model_check::ai_check_model, quick_editor::research::ai_research_context, quick_editor::research::ai_clear_research_context, ai_set_api_key, ai_delete_api_key, ai_get_credential_status, ai_test_connection, ai_list_models, ai_start_chat, ai_stop_chat])
+   ai_chat::ai_prepare_content, ai_model_check::ai_check_model, quick_editor::research::ai_research_context, quick_editor::research::ai_clear_research_context, ai_set_api_key, ai_delete_api_key, ai_get_credential_status, ai_test_connection, ai_list_models, ai_start_chat, ai_stop_chat])
  .build(tauri::generate_context!()).expect("error while building DevFlow")
  .run(|app, event| {
   if let tauri::RunEvent::Exit = event { app.state::<api_tester::ApiTester>().shutdown(); }

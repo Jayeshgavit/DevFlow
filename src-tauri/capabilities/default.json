@@ -1,1 +1,1 @@
-{"identifier":"default","description":"Desktop window and directory selection","windows":["main"],"permissions":["core:default","core:window:allow-close","dialog:allow-open"]}
+{"identifier":"default","description":"Desktop window and directory selection","windows":["main"],"permissions":["core:default","core:window:allow-close","dialog:allow-open","core:window:allow-minimize"]}

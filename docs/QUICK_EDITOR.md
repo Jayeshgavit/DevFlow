@@ -4,6 +4,32 @@ The navigation sidebar has an explicit collapse/expand button and remembers its 
 
 Files open in separate tabs. Opening an existing path selects its tab (case-insensitive for Windows). Each tab retains its draft, disk baseline, preview/edit mode and local snapshot status. Only the active file mounts CodeMirror. Dirty markers cover inactive files too. Closing a dirty tab, changing editor project, reloading disk content or closing the docked application requires confirmation before discarding edits. Save and Ctrl+S still use the existing guarded Rust file API, external-change check, encoding/line-ending preservation and local file snapshots.
 
+## External file changes
+
+Settings → Editor Preferences → External File Changes defaults to **Auto-reload clean files**. All open eligible tabs, including inactive tabs, are checked after relevant Windows directory notifications. Clean tabs refresh without a dialog and show “Updated from disk”; draft text and its disk baseline change together. Existing view/edit mode, syntax/theme/preferences and clamped cursor/selection/scroll are retained where practical. Actual text replacement resets undo history; unchanged disk text does not reset it. Replacing a file with read-only or mixed-ending content disables editing as before.
+
+Dirty tabs keep their exact draft and original disk baseline. An exclamation indicator and compact notice offer **Compare Changes**, **Reload from Disk**, and **Keep My Draft**. Compare is a local side-by-side view of the live draft and disk content read on request, with explicit refresh and no merge. Reload confirms draft discard and rereads disk before applying; if the draft, disk version or owner changed, it stops. Keep My Draft collapses the actions but retains the conflict marker and save-time protection. A missing, linked, oversized, unsupported or inaccessible disk file preserves the tab and offers Retry Reload; it is never recreated or remapped automatically.
+
+**Notify before reloading** keeps content unchanged and offers review/reload/dismiss. **Manual reload only** releases monitoring and leaves explicit Reload and native save-time conflict checks available. Preferences use the existing local settings storage and apply across editor windows. Conflicts transfer in the normal Float/Dock session; the receiver rereads after binding its lease to cover changes during handoff. Only open-file parent folders are watched, with bounded event batching and temporary-access retries. Affected expanded Explorer listings refresh without collapsing folders; other directories still use Explorer Refresh. If a parent directory disappears or monitoring reports a failure, reopen a tab or toggle the preference to retry monitoring. No project files are written and no AI requests are made by synchronization.
+
+Manual acceptance remains required for external in-place and atomic saves, rapid replacements, unchanged-byte writes, clean/dirty inactive tabs, save/reload races, file deletion/recreation, unavailable parents, symlink/junction rejection, Float/Dock during changes, preference changes in both windows, cursor/scroll/undo, and both themes at narrow widths.
+
+### Implementation record — 2026-10-29
+
+Implemented automatic clean-tab refresh, protected dirty-tab conflict actions, missing-file notices, inactive-tab indicators, in-place CodeMirror synchronization, lease-aware watcher handoff, persisted synchronization settings, and background refresh of affected expanded Explorer folders. Existing guarded reads, save-time disk comparisons, snapshots, and writer leases remain the safety boundaries.
+
+| Files | Changes |
+| --- | --- |
+| `src-tauri/src/quick_editor/watch.rs` (new) | Cancellable Windows notifications for open-file parent directories; bounded event batching; registered-path events with lease and subscription generation. |
+| `src-tauri/src/editor_window.rs`, `src-tauri/src/quick_editor.rs`, `src-tauri/src/lib.rs` | Store and release the native registration with editor ownership; expose typed watch/unwatch commands. |
+| `src/use-external-file-sync.ts` (new) | Track all open tabs, reread through trusted IPC, retry temporary failures, reject stale reads and changed baselines, and protect dirty drafts. |
+| `src/QuickEditor.tsx`, `src/editor-session.ts`, `src/editor-api.ts` | Conflict/reload/compare controls, transferable tab status, current-draft checks, typed watcher calls, and scoped Explorer refresh. |
+| `src/EditorSurface.tsx` | Annotated disk-replacement transaction, clamped selection, retained scroll, suppressed edit callbacks, and explicit undo-history reset. |
+| `src/EditorPreferences.tsx`, `src/editor-preferences.ts` | Auto, Notify, and Manual modes in the existing preference store. |
+| `src/quick-editor.css`, `src/guide-content.ts`, `docs/ARCHITECTURE.md`, `docs/QUICK_EDITOR.md` | Compact theme-aware feedback, responsive comparison, local help, architecture, and workflow documentation. |
+
+Verification performed once each after implementation: `npx tsc --noEmit --pretty false` and `cargo check --manifest-path src-tauri/Cargo.toml -q`; both exited successfully with no output. A scoped `git diff --check` also passed. No production build, full test suite, desktop launch, browser automation, external-provider request, or real-project modification was performed for verification. Native Windows behavior and rendering remain manual acceptance items listed above.
+
 ## Native window handoff
 
 Float creates one fixed-label native Tauri window, initially hidden. The main editor hands a serializable session to Rust memory and unmounts. The new window retrieves that session, installs close protection and acknowledges readiness before becoming visible. It loads only the editor root: no dashboard timers, service subscriptions or service actions mount in this window. The initial transfer copy is released on readiness.

@@ -21,10 +21,10 @@
 .qe-service-spinner { animation:qe-service-spin 1s linear infinite; }
 @keyframes qe-service-spin { to { transform:rotate(360deg); } }
 @media(prefers-reduced-motion:reduce) { .qe-service-spinner { animation:none; } }
-.shared-console { display:flex; flex-direction:column; flex:1; min-height:0; min-width:0; overflow:auto; }
+.shared-console { display:flex; flex-direction:column; flex:1; min-height:0; min-width:0; overflow:hidden; }
 .shared-service-status { display:flex; flex-wrap:wrap; gap:4px 14px; padding:4px 10px; color:var(--text-muted); font-size:10px; }
 .shared-console .developer-console { flex:1; min-height:0; overflow:hidden; border:0; border-radius:0; }
-.shared-console .console-viewport { height:100%; min-height:60px; }
+.shared-console .console-viewport { flex:1; height:0; min-height:0; }
 .shared-console .log-viewport-wrap { overflow:hidden; }
 .shared-console .log-retention-note { margin:0; padding:3px 8px; max-height:38px; overflow:auto; font-size:9px; }
 .shared-console .log-footer { flex-wrap:wrap; gap:2px; padding:4px 8px; font-size:10px; }
@@ -37,6 +37,17 @@
 .qe-logs-divider::after { content:''; position:absolute; width:36px; height:3px; border-radius:var(--radius-sm); background:var(--text-faint); top:2px; left:calc(50% - 18px); }
 .qe-logs-divider[hidden] { display:none; }
 .qe-bottom-logs.is-collapsed { flex:0 0 auto; min-height:0; max-height:none; }
+.qe-session-layout>.qe-frame,.qe-floating .qe-session-layout>.qe-frame { min-height:min(160px,45%); }
+.qe-session-layout>.qe-bottom-logs { min-height:min(160px,40%); max-height:calc(100% - min(160px,45%) - 10px); }
+.qe-session-layout>.qe-bottom-logs.is-collapsed { min-height:0; max-height:none; }
+.qe-bottom-logs .shared-logs-heading { flex-wrap:nowrap; padding:4px 8px; gap:6px; }
+.qe-bottom-logs .shared-logs-project { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.qe-bottom-logs .shared-logs-context { flex-wrap:nowrap; gap:6px; }
+.qe-bottom-logs .shared-logs-actions { flex-wrap:nowrap; }
+.qe-bottom-logs .shared-logs-heading .button { min-height:27px; padding:3px 6px; }
+.qe-bottom-logs .console-toolbar { padding:4px 6px; gap:3px; }
+.qe-bottom-logs .console-search { order:0; flex:1 1 140px; }
+.qe-bottom-logs .log-footer { padding:3px 8px; }
 .qe-logs-content { display:flex; flex:1; min-width:0; min-height:0; }
 .qe-logs-content[hidden] { display:none; }
 .qe-logs-divider:hover,.qe-logs-divider:focus-visible { background:var(--accent-strong); outline:2px solid var(--focus); outline-offset:-2px; }

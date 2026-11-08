@@ -39,39 +39,129 @@ pub(crate) fn outgoing_content_issue(content: &str) -> Option<(usize, &'static s
                     || token.starts_with("eyJ") && token.split('.').count() == 3 && token.split('.').all(|p| p.len() >= 8)
             });
             if known_secret { Some("possible API key or access token") }
-            else if lower.split("bearer ").skip(1).any(|value| !masked_value(value.trim_start()) && value.split_whitespace().next().is_some_and(|v| v.len() >= 4)) {
+            else if lower.split("bearer ").skip(1).any(|value| bearer_value_is_sensitive(value, &lower)) {
                 Some("possible bearer credential")
             } else if line.split("://").skip(1).any(|tail| tail.split(['/', ' ', '\t']).next().is_some_and(|authority| authority.contains('@') && authority.split('@').next().is_some_and(|user| user.contains(':')))) {
                 Some("credentials embedded in a URL")
-            } else if line.char_indices().any(|(at, ch)| {
-                if !matches!(ch, '=' | ':' | '(') { return false; }
-                let left = line[..at].trim_end().trim_end_matches(['\"', '\'']);
-                let raw_key = left.rsplit(|c: char| !c.is_ascii_alphanumeric() && c != '_' && c != '-').next().unwrap_or("");
-                let mut key = String::new(); let mut previous_lower = false;
-                for c in raw_key.chars() { if c.is_ascii_uppercase() && previous_lower { key.push('_'); } previous_lower = c.is_ascii_lowercase() || c.is_ascii_digit(); key.push(c.to_ascii_lowercase()); }
-                let fields = ["api_key", "api-key", "apikey", "access_token", "accesstoken", "refresh_token", "refreshtoken", "client_secret", "clientsecret", "secret_key", "password", "password_hash", "passwd", "secret", "credential", "credentials", "auth_token", "authtoken", "authorization", "private_key", "privatekey", "token", "database_url", "connectionstring", "aws_access_key_id", "aws_secret_access_key", "aws_session_token"];
-                if !fields.iter().any(|field| key == *field || key.ends_with(&format!("_{field}"))) { return false; }
-                let value = line[at + ch.len_utf8()..].trim_start();
-                // Literal arguments to setPassword/set_api_key are sensitive;
-                // declarations and calls passing runtime references are not values.
-                if ch == '(' && !value.starts_with(['"', '\'']) { return false; }
-                if masked_value(value) || value.strip_prefix("Bearer ").is_some_and(masked_value) || value.strip_prefix("bearer ").is_some_and(masked_value) { return false; }
-                // These are references to environment storage, never literals.
-                if environment_reference(value) { return false; }
-                // Exact TS type-only field syntax, not arbitrary identifiers.
-                if ch == ':' && ["string;", "string,", "string | undefined;"].contains(&value.trim()) { return false; }
-                true
-            }) { Some("possible credential assignment") }
+            } else if credential_assignment_at(line).is_some() { Some("possible credential assignment") }
             else { None }
         };
         if let Some(reason) = reason { return Some((index + 1, reason)); }
     }
     None
 }
-fn masked_value(value: &str) -> bool {
-    let value = value.trim_start_matches(['"', '\'']);
-    value.strip_prefix("[redacted]").is_some_and(|rest| rest.chars().all(|c| c.is_whitespace() || matches!(c, '"' | '\'' | ',' | ';' | ')' | '}' | ']')))
+fn credential_assignment_at(line: &str) -> Option<usize> {
+    line.char_indices().find_map(|(at, ch)| {
+                if !matches!(ch, '=' | ':' | '(') { return None; }
+                let left = line[..at].trim_end().trim_end_matches(['\"', '\'']);
+                let raw_key = left.rsplit(|c: char| !c.is_ascii_alphanumeric() && c != '_' && c != '-').next().unwrap_or("");
+                let mut key = String::new(); let mut previous_lower = false;
+                for c in raw_key.chars() { if c.is_ascii_uppercase() && previous_lower { key.push('_'); } previous_lower = c.is_ascii_lowercase() || c.is_ascii_digit(); key.push(c.to_ascii_lowercase()); }
+                let fields = ["api_key", "api-key", "apikey", "access_token", "accesstoken", "refresh_token", "refreshtoken", "client_secret", "clientsecret", "secret_key", "password", "password_hash", "passwd", "secret", "credential", "credentials", "auth_token", "authtoken", "authorization", "private_key", "privatekey", "token", "database_url", "connectionstring", "aws_access_key_id", "aws_secret_access_key", "aws_session_token"];
+                if !fields.iter().any(|field| key == *field || key.ends_with(&format!("_{field}"))) { return None; }
+                let value = line[at + ch.len_utf8()..].trim_start();
+                // Literal arguments to setPassword/set_api_key are sensitive;
+                // declarations and calls passing runtime references are not values.
+                if ch == '(' && !value.starts_with(['"', '\'']) { return None; }
+                let literal = value.trim_start_matches(['"', '\'', '`']);
+                if masked_value(value) || literal.strip_prefix("Bearer ").is_some_and(masked_value) || literal.strip_prefix("bearer ").is_some_and(masked_value) { return None; }
+                // These are references to environment storage, never literals.
+                if environment_reference(value) { return None; }
+                // Exact TS type-only field syntax, not arbitrary identifiers.
+                if ch == ':' && ["string;", "string,", "string | undefined;"].contains(&value.trim()) { return None; }
+                Some(at)
+            })
 }
+fn masked_value(value: &str) -> bool {
+    let value = value.trim_start().trim_start_matches(['"', '\'', '`']);
+    let lower = value.to_ascii_lowercase();
+    let exact = ["[redacted]", "redacted", "your_token", "your_api_key", "<token>", "<api_key>", "example_token"];
+    let rest = exact.iter().find_map(|p| lower.strip_prefix(p));
+    let rest = rest.or_else(|| {
+        let inner = value.strip_prefix("${")?;
+        let end = inner.find('}')?;
+        if end == 0 || !inner[..end].chars().all(|c| c.is_ascii_alphanumeric() || c == '_') { return None; }
+        Some(&value[end + 3..])
+    });
+    rest.is_some_and(|rest| rest.chars().all(|c| c.is_whitespace() || matches!(c, '"' | '\'' | '`' | ',' | ';' | ')' | '}' | ']')))
+}
+fn bearer_value_is_sensitive(value: &str, line: &str) -> bool {
+    let token = value.trim_start().split(|c: char| c.is_whitespace() || matches!(c, '"' | '\'' | '`' | ',' | ';')).next().unwrap_or("");
+    if masked_value(token) || masked_value(value) { return false; }
+    let opaque = token.len() >= 20 && token.chars().all(|c| c.is_ascii_alphanumeric() || "_-./+=%".contains(c))
+        && token.chars().any(|c| c.is_ascii_digit() || "_-./+=%".contains(c));
+    let header = line.find("bearer ").is_some_and(|at| {
+        let prefix: String = line[..at].chars().filter(|c| !c.is_whitespace() && !matches!(c, '"' | '\'')).collect();
+        prefix.ends_with("authorization:") || prefix.ends_with("authorization=")
+    });
+    opaque || header && token.len() >= 4
+}
+
+fn quoted_value_end(value: &str) -> Option<usize> {
+    let quote = value.chars().next().filter(|c| matches!(c, '"' | '\''))?;
+    let mut escaped = false;
+    for (at, ch) in value.char_indices().skip(1) {
+        if matches!(ch, '\r' | '\n') { return None; }
+        if escaped { escaped = false; }
+        else if ch == '\\' { escaped = true; }
+        else if ch == quote { return Some(at + ch.len_utf8()); }
+    }
+    None
+}
+
+#[derive(Serialize)]
+pub struct PreparedContent { pub content: String, pub lines: Vec<usize> }
+
+// This conservative proposal never returns the original sensitive line. For values
+// without a reliably delimited span, retain line count and mask the entire line.
+pub(crate) fn prepare_content(content: &str) -> Result<PreparedContent, String> {
+    if content.len() > 1024 * 1024 || content.contains('\0') { return Err("Content is binary or exceeds the 1 MiB request limit.".into()); }
+    let mut lines = Vec::new();
+    let mut output = String::with_capacity(content.len());
+    for (index, line) in content.split_inclusive('\n').enumerate() {
+        if let Some((_, reason)) = outgoing_content_issue(line) {
+            if reason == "private key material" { return Err(format!("Private key content cannot be shared (line {}). Remove the attachment or message content.", index + 1)); }
+            if let Some(at) = credential_assignment_at(line) {
+                let value = line[at + 1..].trim();
+                // A partial/multiline literal cannot safely be removed in isolation.
+                let multiline = value.is_empty() || value.starts_with(['`', '{', '['])
+                    || value.starts_with("\"\"\"") || value.starts_with("\'\'\'")
+                    || value.chars().next().is_some_and(|quote| matches!(quote, '"' | '\'') && quoted_value_end(value).is_none());
+                if multiline { return Err(format!("Cannot safely sanitize a multiline credential at line {}. Remove or replace this content.", index + 1)); }
+            }
+            lines.push(index + 1);
+            let lower = line.to_ascii_lowercase();
+            if reason == "possible bearer credential" {
+                let at = lower.find("bearer ").ok_or("Cannot safely delimit credential; remove this content.")? + 7;
+                let end = line[at..].find(|c: char| c.is_whitespace() || matches!(c, '"' | '\'' | '`' | ',' | ';')).map(|n| at + n).unwrap_or(line.len());
+                let candidate = format!("{}[redacted]{}", &line[..at], &line[end..]);
+                if outgoing_content_issue(&candidate).is_none() { output.push_str(&candidate); continue; }
+            }
+            if reason == "possible credential assignment" {
+                if let Some(at) = credential_assignment_at(line) {
+                    let value_start = at + 1 + line[at + 1..].len() - line[at + 1..].trim_start().len();
+                    let value = &line[value_start..];
+                    if let Some(quote) = value.chars().next().filter(|c| matches!(c, '"' | '\'')) {
+                        if let Some(end) = quoted_value_end(value).map(|n| value_start + n) {
+                            let candidate = format!("{}{}[redacted]{}{}", &line[..value_start], quote, quote, &line[end..]);
+                            if outgoing_content_issue(&candidate).is_none() { output.push_str(&candidate); continue; }
+                        }
+                    }
+                }
+            }
+            // Whole-line fallback preserves indentation and line numbering, never
+            // guesses at multiline literals or includes unknown secret fragments.
+            output.extend(line.chars().take_while(|c| *c == ' ' || *c == '\t'));
+            output.push_str("[redacted]");
+            if line.ends_with('\n') { output.push('\n'); }
+        } else { output.push_str(line); }
+    }
+    if outgoing_content_issue(&output).is_some() { return Err("Cannot safely sanitize this content. Remove or replace it.".into()); }
+    Ok(PreparedContent { content: output, lines })
+}
+#[tauri::command]
+pub fn ai_prepare_content(content: String) -> Result<PreparedContent, String> { prepare_content(&content) }
+
 fn environment_reference(value: &str) -> bool {
     let value = value.trim_end().trim_end_matches(';').trim_end();
     for prefix in ["process.env.", "import.meta.env."] {
@@ -93,17 +183,18 @@ fn environment_reference(value: &str) -> bool {
 }
 pub(crate) fn unsafe_outgoing_content(content: &str) -> bool { outgoing_content_issue(content).is_some() }
 
-fn validate_outgoing_messages(messages: &[ChatMessagePayload]) -> Result<(), String> {
+fn validate_outgoing_messages(messages: &[ChatMessagePayload], budget: usize) -> Result<(), String> {
+    if ![16384, 65536, 262144, 524288].contains(&budget) { return Err("Invalid attachment context budget.".into()); }
     for (index, message) in messages.iter().enumerate() {
         if let Some((line, reason)) = outgoing_content_issue(&message.content) {
             return Err(format!("Outgoing {} message {} blocked: {reason} on line {line}. Remove or redact the value; remove or replace an offending attachment before retrying.", message.role, index + 1));
         }
     }
     let context_size: usize = messages.iter().flat_map(|message| message.content.split("--- BEGIN USER-PROVIDED CONTEXT ").skip(1)).map(|block| {
-        block.split_once('\n').and_then(|(_, body)| body.split_once('\n').map(|(_, context)| context.split_once("\n--- END USER-PROVIDED CONTEXT ").map(|(payload, _)| payload.len()).unwrap_or(usize::MAX))).unwrap_or(usize::MAX)
+        block.split_once('\n').and_then(|(_, body)| body.split_once('\n').map(|(_, context)| context.split_once("\n--- END USER-PROVIDED CONTEXT ").map(|(payload, _)| if payload.len() <= 256 * 1024 { payload.len() } else { usize::MAX }).unwrap_or(usize::MAX))).unwrap_or(usize::MAX)
     }).fold(0usize, usize::saturating_add);
-    if context_size > 12_000 {
-        return Err("Attached context exceeds the 12,000-byte safety limit.".into());
+    if context_size > budget {
+        return Err(format!("Attached context exceeds the selected {budget}-byte budget. Select a smaller range or change the budget."));
     }
     Ok(())
 }
@@ -130,11 +221,46 @@ mod context_safety_tests {
     }
 
     #[test]
+    fn documentation_placeholders_and_sanitized_approval_content() {
+        for placeholder in ["YOUR_TOKEN", "<token>", "REDACTED", "example_token", "${API_KEY}"] {
+            for text in [format!("Authorization: Bearer {placeholder}"), format!("const api_key = \"{placeholder}\";"), format!(r#"{{"Authorization": "Bearer {placeholder}"}}"#)] {
+                assert!(!unsafe_outgoing_content(&text), "placeholder rejected: {text}");
+                assert_eq!(prepare_content(&text).unwrap().content, text);
+            }
+        }
+        for text in ["Explain bearer authentication and authorization headers", "Bearer tokens authenticate requests.", "possible bearer credential on line 161", "const api_key = process.env.API_KEY;", "password = os.getenv('PASSWORD')", "const headers = { Authorization: `Bearer ${API_KEY}` };", "const headers = { Authorization: \"Bearer <token>\" };"] {
+            assert_eq!(prepare_content(text).unwrap().content, text);
+        }
+        let token = "aB3dE5gH7jK9mN1pQ3rS5tU7";
+        let input = format!("safe\nAuthorization: Bearer {token}\nkeep this\n");
+        let safe = prepare_content(&input).unwrap();
+        assert_eq!(safe.lines, vec![2]);
+        assert_eq!(safe.content, "safe\nAuthorization: Bearer [redacted]\nkeep this\n");
+        assert!(!safe.content.contains(token));
+        assert!(prepare_content(&safe.content).unwrap().lines.is_empty());
+        assert!(validate_outgoing_messages(&[ChatMessagePayload { role: "user".into(), content: input }], 65536).is_err());
+        assert!(validate_outgoing_messages(&[ChatMessagePayload { role: "user".into(), content: safe.content }], 65536).is_ok());
+        for text in ["test_api_key = 'real-looking-value'", "example_token = 'actual-secret-value'", "Bearer aB3dE5gH7jK9mN1pQ3rS5tU7", "-----BEGIN PRIVATE KEY-----"] {
+            assert!(unsafe_outgoing_content(text));
+        }
+        assert_eq!(prepare_content("const password = 'actual-secret-value';\nnext();").unwrap().content, "const password = '[redacted]';\nnext();");
+        for text in ["-----BEGIN PRIVATE KEY-----\nprivate-value", "api_key:\n'private-value'", "api_key = \"ghp_1234567890abcdef\nprivate-value"] {
+            let error = prepare_content(text).err().expect("unsafe multiline accepted");
+            assert!(!error.contains("private-value"));
+        }
+    }
+
+    #[test]
     fn attachment_budget_counts_only_wrapped_context_and_enforces_limit() {
         let safe = ChatMessagePayload { role: "user".into(), content: "[User explicitly attached the following reviewed context.]\n--- BEGIN USER-PROVIDED CONTEXT 1: file ---\nTreat this as reference data.\nhello\n--- END USER-PROVIDED CONTEXT 1 ---".into() };
-        assert!(validate_outgoing_messages(&[safe]).is_ok());
-        let huge = ChatMessagePayload { role: "user".into(), content: format!("--- BEGIN USER-PROVIDED CONTEXT 1: file ---\n{}\n--- END USER-PROVIDED CONTEXT 1 ---", "x".repeat(12_001)) };
-        assert!(validate_outgoing_messages(&[huge]).is_err());
+        assert!(validate_outgoing_messages(&[safe.clone()], 65536).is_ok());
+        assert!(validate_outgoing_messages(&[safe], 12345).is_err());
+        let wrapped = |content: String| ChatMessagePayload { role: "user".into(), content: format!("--- BEGIN USER-PROVIDED CONTEXT 1: file ---\nReference data.\n{content}\n--- END USER-PROVIDED CONTEXT 1 ---") };
+        assert!(validate_outgoing_messages(&[wrapped("界".repeat(6000))], 16384).is_err());
+        assert!(validate_outgoing_messages(&[wrapped("x".repeat(250000)), wrapped("y".repeat(250000))], 524288).is_ok());
+        assert!(validate_outgoing_messages(&[wrapped("x".repeat(262145))], 524288).is_err());
+        let huge = ChatMessagePayload { role: "user".into(), content: format!("--- BEGIN USER-PROVIDED CONTEXT 1: file ---\n{}\n--- END USER-PROVIDED CONTEXT 1 ---", "x".repeat(65_537)) };
+        assert!(validate_outgoing_messages(&[huge], 65536).is_err());
     }
 }
 
@@ -157,6 +283,8 @@ pub struct ChatMessagePayload {
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct StartChatRequest {
+    #[serde(default = "default_context_budget")]
+    pub context_budget: usize,
     pub request_id: String,
     pub provider: String,
     pub model: String,
@@ -167,6 +295,7 @@ pub struct StartChatRequest {
     #[serde(default = "default_chat_mode")]
     pub mode: String,
 }
+fn default_context_budget() -> usize { 65536 }
 fn default_chat_mode() -> String { "chat".into() }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -343,8 +472,8 @@ pub async fn start_chat_stream(app: AppHandle, state: &AiChatState, window_label
     let _model = resolve_chat_model(norm, &request.model)?;
     let key = get_api_key(norm)?.ok_or_else(|| format!("No API key configured for {norm}."))?;
     if request.messages.is_empty() { return Err("Enter a message.".into()); }
-    if request.messages.len()>20 || request.messages.iter().map(|m| m.content.len()).sum::<usize>()>48000 { return Err("Conversation exceeds safety bounds; start a new chat.".into()); }
-    validate_outgoing_messages(&request.messages)?;
+    if request.messages.len()>20 || request.messages.iter().map(|m| m.content.len()).sum::<usize>()>1024*1024 { return Err("Conversation exceeds safety bounds; start a new chat.".into()); }
+    validate_outgoing_messages(&request.messages, request.context_budget)?;
     if !matches!(request.mode.as_str(), "chat" | "research" | "web") { return Err("Invalid assistant mode.".into()); }
     if (request.mode == "research") != request.research_token.is_some() { return Err("Research mode requires an authorized project context; other modes cannot use research tools.".into()); }
     let context = request.research_token.as_ref().map(|token| app.state::<crate::quick_editor::research::ResearchState>().get(window_label,token)).transpose()?;
@@ -397,9 +526,26 @@ async fn run_turn(app:&AppHandle,window:&str,request:&StartChatRequest,endpoint:
         if let Some(c)=&context {c.validate(app)?;}
         transmitted_context += messages.iter().filter(|m| m["role"] == "tool").map(|m|m["content"].as_str().unwrap_or("").len()).sum::<usize>();
         if transmitted_context>256*1024 { return Err("Research reached its cumulative transmitted-context limit (256 KiB). Ask a narrower follow-up.".into()); }
+        // Validate the actual assembled turns again, including research results,
+        // tool arguments and reasoning, before any provider request.
+        fn validate_value(value: &Value) -> Result<(), String> {
+            match value {
+                Value::String(text) => if let Some((line, reason)) = outgoing_content_issue(text) {
+                    return Err(format!("Provider request blocked: {reason} on line {line}. Remove or replace the context; no request was sent."));
+                },
+                Value::Array(items) => for item in items { validate_value(item)?; },
+                Value::Object(items) => for item in items.values() { validate_value(item)?; },
+                _ => {}
+            }
+            Ok(())
+        }
+        for message in &messages { validate_value(message)?; }
         let mut payload=json!({"model":model,"messages":messages,"stream":true,"max_tokens":request.max_tokens.unwrap_or(1024).clamp(64,8192)});
         if let Some(temperature)=request.temperature {payload["temperature"]=json!(temperature);}
         crate::ai_provider::configure(&mut payload,provider,context.is_some());
+        if serde_json::to_vec(&payload).map_err(|_| "Cannot encode provider request.")?.len() > 2 * 1024 * 1024 {
+            return Err("Encoded provider request exceeds 2 MiB. Reduce context or research scope; nothing was truncated.".into());
+        }
         state.pace_provider(provider).await?;
         let response=crate::ai_provider::request(&client,provider,key,reqwest::Method::POST,endpoint)
             .header("Accept","text/event-stream").json(&payload).send().await.map_err(|_|"Provider connection failed or timed out.")?;

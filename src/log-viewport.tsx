@@ -10,11 +10,12 @@ function rowKey(entry: LogEntry) {
 }
 
 // Measured heights keep wrapped lines and expanded stacks in the same scroll model.
-export function LogViewport({ groups, scope, follow, onPause, fontSize, wrap, layoutKey, target, targetRequest, renderRow, empty, onVisible }: {
+export function LogViewport({ groups, scope, follow, onPause, fontSize, wrap, layoutKey, target, targetRequest, renderRow, empty, onVisible, onLatestChange }: {
   groups: LogGroup[]; scope: string; follow: boolean; onPause: () => void;
   fontSize: number; wrap: boolean; layoutKey?: string; target: LogEntry | null; targetRequest?: number;
   renderRow: (group: LogGroup) => React.ReactNode; empty: React.ReactNode;
   onVisible: (groups: LogGroup[]) => void;
+  onLatestChange?: (latest: boolean) => void;
 }) {
   const viewport = useRef<HTMLDivElement>(null);
   const heights = useRef(new WeakMap<LogEntry, number>());
@@ -24,6 +25,7 @@ export function LogViewport({ groups, scope, follow, onPause, fontSize, wrap, la
   const previousTarget = useRef(target);
   const previousRequest = useRef(targetRequest);
   const userScrolling = useRef(false);
+  const measuredWidth = useRef(0);
   const [position, setPosition] = useState({ top: 0, height: 600, width: 0 });
   const [revision, setRevision] = useState(0);
   const offsets = useMemo(() => {
@@ -37,7 +39,7 @@ export function LogViewport({ groups, scope, follow, onPause, fontSize, wrap, la
     return Math.min(low, Math.max(0, groups.length - 1));
   };
   const first = indexAt(position.top);
-  const last = indexAt(position.top + position.height);
+  const last = indexAt(Math.max(position.top, position.top + position.height - 1));
   const start = Math.max(0, first - 8);
   const end = Math.min(groups.length, last + 9);
   const measure = useCallback((entry: LogEntry, height: number) => {
@@ -51,8 +53,11 @@ export function LogViewport({ groups, scope, follow, onPause, fontSize, wrap, la
     if (!element) return;
     const observer = new ResizeObserver(() => {
       if (!element.clientWidth || !element.clientHeight) return; // hidden tab
-      heights.current = new WeakMap();
-      setRevision(value => value + 1);
+      if (measuredWidth.current !== element.clientWidth) {
+        measuredWidth.current = element.clientWidth;
+        heights.current = new WeakMap();
+        setRevision(value => value + 1);
+      }
       setPosition({ top: element.scrollTop, height: element.clientHeight, width: element.clientWidth });
     });
     observer.observe(element);
@@ -91,6 +96,10 @@ export function LogViewport({ groups, scope, follow, onPause, fontSize, wrap, la
     setPosition(current => current.top === element.scrollTop ? current : { ...current, top: element.scrollTop });
   }, [groups, offsets, scope, follow, target, targetRequest, position.height, position.width]);
   useLayoutEffect(() => { onVisible(groups.slice(first, last + 1)); }, [groups, first, last, onVisible]);
+  useLayoutEffect(() => {
+    const element = viewport.current;
+    if (element) onLatestChange?.(element.scrollHeight - element.scrollTop - element.clientHeight <= 36);
+  }, [position.top, position.height, groups, offsets, onLatestChange]);
   useLayoutEffect(() => {
     if (target) viewport.current?.querySelector<HTMLElement>('.is-targeted')?.focus({ preventScroll: true });
   }, [target, targetRequest, start, end]);

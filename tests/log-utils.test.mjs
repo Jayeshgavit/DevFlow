@@ -7,6 +7,23 @@ const source = await readFile(new URL('../src/log-utils.ts', import.meta.url), '
 const javascript = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.ES2022, target: ts.ScriptTarget.ES2022 } }).outputText;
 const { logCopyGroups, errorContext, parseErrorLocation, logStopServices, classifyLog, parseHttp, groupLogs, formatEntry, serviceGroup, buildAiDebugPrompt, summarizeGroups, appendLog, appendLogs, logBytes, createSourceDeduper, createAnsiLogNormalizer, redactForSharing, MAX_SERVICE_LOGS, MAX_PROJECT_LOGS, MAX_SESSION_LOGS, MAX_SERVICE_LOG_BYTES, MAX_PROJECT_LOG_BYTES, MAX_SESSION_LOG_BYTES } = await import(`data:text/javascript;base64,${Buffer.from(javascript).toString('base64')}`);
 
+test('sharing masks structured credentials while retaining query context', () => {
+  const value = redactForSharing('{"api_key":"json-value","password":"json-pass"}\nAuthorization: Basic dXNlcjpwYXNz\nCookie: session=private; user=hidden\nmongodb+srv://user:dbpass@host/db\nGET /api?access_token=query-secret&limit=10 HTTP/1.1 200');
+  for (const secret of ['json-value', 'json-pass', 'dXNlcjpwYXNz', 'private', 'hidden', 'dbpass', 'query-secret']) assert.ok(!value.includes(secret), secret);
+  assert.ok(value.includes('limit=10'));
+  assert.ok(value.includes('host/db'));
+  assert.equal(redactForSharing('value\u202esecret'), 'value\\u202esecret');
+});
+
+test('HTTP diagnostics reject unrelated phrases and count repeated request events', () => {
+  assert.equal(parseHttp('GET configuration 200'), null);
+  const entries = [1, 2, 3].map(receivedAt => ({ projectId: 'p', serviceId: 'api', stream: 'stdout', message: 'GET /failure HTTP/1.1 500', receivedAt }));
+  const groups = groupLogs(entries);
+  assert.equal(groups.length, 1);
+  assert.equal(summarizeGroups(groups).requests, 3);
+  assert.equal(summarizeGroups(groups).counts.error, 3);
+});
+
 test('classifies status codes, stderr info, warnings, and successful builds semantically', () => {
   assert.equal(classifyLog('INFO: "GET /health HTTP/1.1" 200 OK'), 'success');
   assert.equal(classifyLog('GET /errors HTTP/1.1 200 OK'), 'success');

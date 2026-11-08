@@ -62,4 +62,18 @@ Use native buttons and labelled inputs. Keyboard focus uses `--focus`; dialogs f
 
 ## Visual principles
 
+### Overview
+
+The selected workspace anchors the page with its actual service state, HTTP check timestamps, session-log availability and existing project actions. A single ruled status strip summarizes saved projects, managed services, reported failures and the last completed environment check. Recent, Running and Needs attention filter the project list; secondary per-project actions expand inline under Project tools. Tools and recorded activity form a quieter side column that stacks below project work at narrower widths.
+
+Overview uses the existing UI type family, neutral surfaces and semantic status colors. A restrained blue surface distinguishes the selected workspace, mint indicates managed running state, and amber marks recorded activity. Long project names and paths wrap; controls have visible keyboard focus, disabled-start explanations and 44 px touch targets at narrow widths. No decorative metrics, background probes or additional process collectors are introduced.
+
+### Logs workspace
+
+The shared Logs viewer adapts to its own container width. Its primary toolbar keeps service selection, search, visual following, Copy, and More accessible. Process controls expand explicitly; display/stream settings and history limits live under More. Docked and floating viewers share the existing projected log stream and use a single output scroll container. Jump to latest occupies a separate rail below the output and appears only when the viewport is away from its end. Resizing retains measured row heights unless the output width changes.
+
+Search navigation counts matching blocks; severity counts describe retained lines rather than independent process crashes. Copy visible blocks includes complete contents of intersecting blocks, including collapsed lines; filtered export uses the matching buffered entries in chronological order.
+
+Display and Copy/Export use the same best-effort masking for recognized credential fields, Basic/Bearer authorization, cookie headers, and URL/connection-string credentials. Raw buffered data remains available to the existing internal classification and grouping pipeline. Unrecognized/custom secrets and cross-line credential fragments may remain: review output before sharing. Output remains inert React text; only validated, user-initiated local links and project-file actions are offered.
+
 Keep project work and logs immediately visible. Use large headings sparingly, dense but readable service panels, and accent color for meaning. Do not add fake resource charts, decorative dashboards, broad neon glows, or controls without a real action. Preserve typed Tauri IPC names and event contracts when changing presentation.

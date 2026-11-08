@@ -1,7 +1,8 @@
 import type { Project } from './types';
 import type { FileDocument } from './editor-api';
 
-export type EditorTab = { path: string; document: FileDocument; baseline: string; text: string; editing: boolean; surfaceOpened: boolean; backup: string };
+export type EditorViewPosition = { anchor: number; head: number; top: number; left: number };
+export type EditorTab = { external?: 'changed' | 'missing'; externalDismissed?: boolean; updatedFromDisk?: boolean; syncRevision?: number; position?: EditorViewPosition; path: string; document: FileDocument; baseline: string; text: string; editing: boolean; surfaceOpened: boolean; backup: string };
 export type EditorSession = { workspace?: Project; tabs: EditorTab[]; active: string; width: number; collapsed: boolean; layout?: { logsOpen: boolean; logsHeight: number; expanded: string[] }; ai?: { open: boolean; width: number; provider: import('./ai-api').AiProvider; model: string; draft: string; messages: import('./AiAssistantPanel').ChatMessage[]; attachments: import('./ai-context').AiAttachment[]; reviewed: string } };
 export const tabKey = (path: string) => path.toLowerCase();
 export const tabDirty = (tab: EditorTab) => tab.text !== tab.baseline;

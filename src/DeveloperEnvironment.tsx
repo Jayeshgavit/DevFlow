@@ -4,6 +4,7 @@ import { Box, Check, Code2, Copy, Database, GitBranch, RefreshCw, Search, Termin
 import { Button, Card } from './components';
 import type { Project } from './types';
 import './developer-environment.css';
+import type { EnvironmentSummary } from './Overview';
 
 type Tool = { id: string; name: string; status: 'installed' | 'notFound' | 'checkFailed' | 'unknown'; version: string | null; location: string | null; detail: string };
 type Requirement = { ecosystem: string; name: string; constraint: string; installedVersion: string | null; status: 'missing' | 'mismatch' | 'satisfied' | 'unknown'; detail: string };
@@ -20,8 +21,12 @@ const toolIcon = (id: string) => ['node', 'npm', 'pnpm', 'yarn', 'python', 'pip'
 const displayPath = (path: string) => path.replace(/^\\\\\?\\UNC\\/i, '\\\\').replace(/^\\\\\?\\/, '');
 const toolStatus = (tool?: Tool, checking = false) => checking ? 'checking' : tool?.status ?? 'unchecked';
 
-export default function DeveloperEnvironment({ project, projects, selectProject }: { project?: Project; projects: Project[]; selectProject: (id: string) => void }) {
+export default function DeveloperEnvironment({ project, projects, selectProject, onSummary }: { project?: Project; projects: Project[]; selectProject: (id: string) => void; onSummary?: (summary: EnvironmentSummary) => void }) {
   const [tools, setTools] = useState<Record<string, Tool>>({});
+  useEffect(() => {
+    const checked = Object.values(tools);
+    if (checked.length) onSummary?.({ checkedAt: Date.now(), checked: checked.length, installed: checked.filter(tool => tool.status === 'installed').length, unavailable: checked.filter(tool => tool.status !== 'installed').length });
+  }, [tools, onSummary]);
   const [requirements, setRequirements] = useState<Requirements | null>(null);
   const [query, setQuery] = useState('');
   const [filter, setFilter] = useState('all');

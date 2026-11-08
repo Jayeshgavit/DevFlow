@@ -12,6 +12,23 @@ const FILE_COUNT: usize = 100;
 #[serde(rename_all = "camelCase")]
 pub struct Export { text: String, warnings: Vec<String>, files: usize }
 
+const COPY_BUDGETS: [usize; 5] = [16_384, 65_536, 131_072, 262_144, 524_288];
+const COPY_HEADER: &str = "Review the following source context. Identify every changed or new file by its project-relative path. Folder exports are filtered snapshots, not complete projects.\n";
+
+fn readable_path(path: &Path) -> String {
+    let value = path.to_string_lossy();
+    // Extended-only names (reserved devices, trailing dots/spaces, etc.) must
+    // retain their prefix: stripping it would change Win32 path interpretation.
+    let ordinary = |parts: &str| parts.split('\\').filter(|part| !part.is_empty()).all(|part| valid_name(part).is_ok());
+    if let Some(unc) = value.strip_prefix(r"\\?\UNC\") {
+        if ordinary(unc) { return format!(r"\\{unc}"); }
+    }
+    if let Some(drive) = value.strip_prefix(r"\\?\") {
+        if drive.as_bytes().first().is_some_and(u8::is_ascii_alphabetic) && drive.as_bytes().get(1) == Some(&b':') && drive.as_bytes().get(2) == Some(&b'\\') && ordinary(&drive[3..]) { return drive.to_string(); }
+    }
+    value.into_owned()
+}
+
 pub(super) fn excluded(path: &str) -> bool {
     path.split('/').any(|part| {
         let p = part.to_ascii_lowercase();
@@ -64,25 +81,40 @@ fn ignored(rules: &[Gitignore], path: &Path, directory: bool) -> bool {
 }
 struct Collector {
     root: PathBuf, tree: String, contents: String, files: usize, entries: usize, bytes: usize,
-    skipped: BTreeMap<&'static str, usize>, start: Instant, stopped: bool, ai: bool,
+    skipped: BTreeMap<&'static str, usize>, start: Instant, stopped: bool, ai: bool, clipboard: bool, budget: usize, reviews: Vec<String>, omissions: Vec<String>,
 }
 impl Collector {
     fn skip(&mut self, reason: &'static str) { *self.skipped.entry(reason).or_default() += 1; }
     fn limit(&mut self) -> bool {
         if self.stopped { return true; }
-        if self.entries >= ENTRY_LIMIT || self.files >= FILE_COUNT || self.bytes >= TOTAL_LIMIT || self.tree.len() >= 128 * 1024 || self.start.elapsed() > Duration::from_secs(5) {
+        if self.entries >= ENTRY_LIMIT || (self.ai && self.files >= FILE_COUNT) || self.bytes >= TOTAL_LIMIT || self.tree.len() >= 128 * 1024 || self.start.elapsed() > Duration::from_secs(5) {
             self.skip("Traversal/output limit reached; remaining entries omitted"); self.stopped = true;
         }
         self.stopped
     }
+    fn omit(&mut self, relative: &str, reason: &str) { self.omissions.push(format!("{relative}: {reason}")); }
     fn file(&mut self, path: &Path, relative: &str, draft: Option<&str>) -> Result<bool, String> {
+        if !self.ai { self.files += 1; return Ok(true); }
         if language(relative).is_none() { self.skip("Unsupported/generated/binary file types"); return Ok(false); }
         let metadata = fs::symlink_metadata(path).map_err(|_| "Cannot inspect file.")?;
         if linked(&metadata) || !metadata.is_file() { self.skip("Linked or nonregular files"); return Ok(false); }
-        if metadata.len() > FILE_LIMIT || draft.is_some_and(|value| value.len() as u64 > FILE_LIMIT) { self.skip("Files above 256 KiB"); return Ok(false); }
+        if metadata.len() > if self.clipboard { MAX_BYTES } else { FILE_LIMIT } || draft.is_some_and(|value| value.len() as u64 > if self.clipboard { MAX_BYTES } else { FILE_LIMIT }) { self.skip(if self.clipboard { "Files above trusted 2 MiB read limit" } else { "Files above 256 KiB" }); return Ok(false); }
         let (_file, disk, _) = open_text(path)?;
-        if disk.len() as u64 > FILE_LIMIT { self.skip("Files above 256 KiB"); return Ok(false); }
+        if disk.len() as u64 > if self.clipboard { MAX_BYTES } else { FILE_LIMIT } { self.skip(if self.clipboard { "Files above trusted 2 MiB read limit" } else { "Files above 256 KiB" }); return Ok(false); }
         let content = draft.unwrap_or(&disk);
+        if self.clipboard {
+            if content.len() > self.budget { self.skip("Source exceeds selected budget"); return Ok(false); }
+            let safe = crate::ai_chat::prepare_content(content)?;
+            let block = file_block(relative, &safe.content);
+            // Reserve room for tree/omission metadata; final assembled bytes are checked again.
+            if self.contents.len() + self.tree.len() + block.len() + COPY_HEADER.len() + 2048 > self.budget {
+                self.skip("Budget exceeded; choose a larger budget or copy specific files/selected code");
+                return Ok(false);
+            }
+            if !safe.lines.is_empty() { self.reviews.push(format!("{relative}: sanitized source lines {:?}", safe.lines)); }
+            self.contents.push_str(&block); self.bytes += content.len(); self.files += 1;
+            return Ok(true);
+        }
         if content.contains('\0') || sensitive_content(&disk) || sensitive_content(content) { self.skip("Potentially sensitive or binary content"); return Ok(false); }
         if self.bytes + content.len() > TOTAL_LIMIT { self.skip("Total content limit reached; file omitted"); self.stopped = true; return Ok(false); }
         if self.ai { self.contents.push_str(&file_block(relative, content)); }
@@ -93,17 +125,18 @@ impl Collector {
         if depth > 24 { self.skip("Folders deeper than 24 levels"); return Ok(()); }
         let _guards = guard_directories(directory)?;
         let before = rules.len();
-        if let Some(rule) = local_ignore(directory)? { rules.push(rule); }
+        if self.ai { if let Some(rule) = local_ignore(directory)? { rules.push(rule); } }
         let mut entries = Vec::new();
         for entry in fs::read_dir(directory).map_err(|_| "Cannot read folder.")? {
             if self.limit() { break; }
             self.entries += 1;
             let entry = entry.map_err(|_| "Cannot read directory entry.")?;
             let relative = entry.path().strip_prefix(&self.root).map_err(|_| "Path outside project.")?.to_str().ok_or("Non UTF-8 path.")?.replace('\\', "/");
-            if validate_relative(&relative).is_err() || excluded(&relative) { self.skip("Sensitive, generated, dependency or cache paths"); continue; }
             let metadata = fs::symlink_metadata(entry.path()).map_err(|_| "Cannot inspect directory entry.")?;
-            if linked(&metadata) { self.skip("Symlinks or junctions"); continue; }
-            if ignored(rules, &entry.path(), metadata.is_dir()) { self.skip("Gitignored entries"); continue; }
+            let prune = if self.ai { excluded(&relative) } else { metadata.is_dir() && matches!(entry.file_name().to_str(), Some("node_modules" | ".git" | ".next" | "dist" | "build" | "target" | ".cache" | ".venv" | "__pycache__")) };
+            if validate_relative(&relative).is_err() || prune { self.omit(&relative, "excluded path"); self.skip("Sensitive, generated, dependency or cache paths"); continue; }
+            if linked(&metadata) { self.omit(&relative, "linked path"); self.skip("Symlinks or junctions"); continue; }
+            if self.ai && ignored(rules, &entry.path(), metadata.is_dir()) { self.omit(&relative, "gitignored"); self.skip("Gitignored entries"); continue; }
             entries.push((entry.path(), relative, metadata.is_dir()));
         }
         entries.sort_by(|a, b| b.2.cmp(&a.2).then_with(|| a.1.cmp(&b.1)));
@@ -118,7 +151,7 @@ impl Collector {
             } else {
                 match self.file(&path, &relative, None) {
                     Ok(true) => self.tree.push_str(&format!("{prefix}{}{name}\n", if last { "└── " } else { "├── " })),
-                    Ok(false) => {}, Err(_) => self.skip("Unreadable, binary or non UTF-8 files"),
+                    Ok(false) => { self.omit(&relative, "not included (type, size or budget)"); }, Err(_) => { self.omit(&relative, "unreadable, binary or cannot safely sanitize"); self.skip("Unreadable, binary or unsafe files"); },
                 }
             }
         }
@@ -126,39 +159,74 @@ impl Collector {
         Ok(())
     }
 }
+#[cfg(test)]
 fn export(root: &Path, relative: &str, mode: &str, draft: Option<&str>) -> Result<Export, String> {
+    export_budget(root, relative, mode, draft, 65_536)
+}
+fn export_budget(root: &Path, relative: &str, mode: &str, draft: Option<&str>, budget: usize) -> Result<Export, String> {
     validate_relative(relative)?;
-    if excluded(relative) { return Err("Copy blocked: sensitive, generated or excluded path.".into()); }
+    if mode != "tree" && excluded(relative) { return Err("Copy blocked: sensitive, generated or excluded path.".into()); }
     let target = root.join(relative);
-    let directory = mode != "file";
+    let directory = !matches!(mode, "file" | "attachment" | "copy-file" | "copy-slice");
     let _guards = guard_directories(if directory { &target } else { target.parent().ok_or("Invalid file path.")? })?;
     let canonical = fs::canonicalize(&target).map_err(|_| "Path unavailable.")?;
     if !canonical.starts_with(root) || linked(&fs::symlink_metadata(&target).map_err(|e| e.to_string())?) { return Err("Linked or outside-project paths are blocked.".into()); }
-    let mut collector = Collector { root: root.to_owned(), tree: format!("{}/\n", if relative.is_empty() { "." } else { relative }), contents: String::new(), files: 0, entries: 0, bytes: 0, skipped: BTreeMap::new(), start: Instant::now(), stopped: false, ai: mode != "tree" };
+    let mut collector = Collector { root: root.to_owned(), tree: format!("{}/\n", if relative.is_empty() { "." } else { relative }), contents: String::new(), files: 0, entries: 0, bytes: 0, skipped: BTreeMap::new(), start: Instant::now(), stopped: false, ai: mode != "tree", clipboard: mode.starts_with("copy-"), budget, reviews: vec![], omissions: vec![] };
     let mut rules = Vec::new();
     let mut parent = root.to_owned();
     // Load only in-project ancestor ignore rules; never inspect user/global config.
-    if let Some(rule) = local_ignore(&parent)? { rules.push(rule); }
+    if mode != "tree" { if let Some(rule) = local_ignore(&parent)? { rules.push(rule); } }
     let parent_relative = if directory { relative } else { relative.rsplit_once('/').map(|(p, _)| p).unwrap_or("") };
     for part in parent_relative.split('/').filter(|p| !p.is_empty()) {
         parent.push(part);
         if ignored(&rules, &parent, true) { return Err("Copy blocked: folder is ignored by .gitignore.".into()); }
-        if parent != target { if let Some(rule) = local_ignore(&parent)? { rules.push(rule); } }
+        if mode != "tree" && parent != target { if let Some(rule) = local_ignore(&parent)? { rules.push(rule); } }
     }
     if directory {
         collector.walk(&target, &mut rules, "", 0)?;
     } else {
         if ignored(&rules, &target, false) { return Err("Copy blocked: file is ignored by .gitignore.".into()); }
+        if mode == "copy-file" || mode == "copy-slice" {
+            if language(relative).is_none() { return Err("Unsupported AI source file type.".into()); }
+            let (_file, disk, _) = open_text(&target)?;
+            let source = draft.unwrap_or(&disk);
+            if source.len() > budget { return Err("Copy exceeds selected budget. Choose a larger budget or selected code. Nothing was truncated.".into()); }
+            let safe = crate::ai_chat::prepare_content(source)?;
+            let warnings = if safe.lines.is_empty() { vec![] } else { vec![format!("{relative}: sanitized source lines {:?}", safe.lines)] };
+            let text = if mode == "copy-slice" { safe.content } else { format!("{COPY_HEADER}Source: disk file\n{}", file_block(relative, &safe.content)) };
+            if text.len() > budget { return Err("Copy exceeds selected budget. Choose a larger budget, specific files, or selected code. Nothing was truncated.".into()); }
+            return Ok(Export { text, warnings, files: 1 });
+        }
+        if mode == "attachment" {
+            if language(relative).is_none() { return Err("Unsupported AI source file type.".into()); }
+            let (_file, disk, _) = open_text(&target)?;
+            if disk.len() as u64 > FILE_LIMIT || draft.is_some_and(|v| v.len() as u64 > FILE_LIMIT) { return Err("Attachment exceeds 256 KiB.".into()); }
+            // Inspect disk even when a draft/selection is supplied. Private keys
+            // remain blocked; only the reviewed snapshot leaves this boundary.
+            crate::ai_chat::prepare_content(&disk)?;
+            let safe = crate::ai_chat::prepare_content(draft.unwrap_or(&disk))?;
+            let warnings = if safe.lines.is_empty() { vec![] } else { vec![format!("Sanitized source lines: {:?}. Review sanitized content before sending.", safe.lines)] };
+            return Ok(Export { text: safe.content, warnings, files: 1 });
+        }
         validate_ai_file(&target, relative, draft)?;
         if !collector.file(&target, relative, draft)? { return Err("Copy blocked: sensitive, unsupported, binary or oversized file.".into()); }
     }
     let warnings: Vec<String> = collector.skipped.iter().map(|(reason, count)| format!("{reason}: {count}")).collect();
-    let mut text = if mode == "file" { collector.contents } else { format!("FOLDER NAME: {}\nFOLDER: {}\n\nTREE:\n{}{}", target.file_name().unwrap_or_default().to_string_lossy(), if relative.is_empty() { "." } else { relative }, collector.tree, collector.contents) };
+    let mut text = if mode == "file" { std::mem::take(&mut collector.contents) } else { format!("FOLDER NAME: {}\nFOLDER: {}\n\nTREE:\n{}{}", target.file_name().unwrap_or_default().to_string_lossy(), if relative.is_empty() { "." } else { relative }, collector.tree, collector.contents) };
     if !warnings.is_empty() { text.push_str("\nWARNINGS (copy is filtered or incomplete):\n"); text.push_str(&warnings.join("\n")); text.push('\n'); }
+    let mut warnings = warnings;
+    if collector.clipboard {
+        if !collector.omissions.is_empty() { text.push_str("\nOMITTED FILES / SUBTREES (not a complete project):\n"); text.push_str(&collector.omissions.join("\n")); }
+        if collector.files == 0 { return Err("No eligible complete files fit this folder export. Choose a larger budget, a smaller folder, a specific file or selected code. Use Copy Folder Tree for names only.".into()); }
+        warnings.extend(collector.reviews);
+        text.insert_str(0, &format!("{COPY_HEADER}Source: disk files\n"));
+        if text.len() > budget { return Err("Folder output exceeds selected budget including metadata. Choose a larger budget, a smaller folder, specific files or selected code. Nothing was copied or truncated.".into()); }
+    }
     Ok(Export { text, warnings, files: collector.files })
 }
 
 fn validate_ai_file(path: &Path, relative: &str, draft: Option<&str>) -> Result<(), String> {
+    if language(relative).is_none() { return Err(format!("{relative}: unsupported AI source file type.")); }
     if excluded(relative) { return Err("AI context blocked: sensitive, generated or excluded path.".into()); }
     let (_file, disk, _) = open_text(path).map_err(|_| "AI context blocked: file is unavailable, binary, or over the 2 MiB editor limit.")?;
     if draft.is_some_and(|text| text.len() as u64 > MAX_BYTES) { return Err("AI context blocked: draft exceeds the 2 MiB editor limit.".into()); }
@@ -172,18 +240,29 @@ fn validate_ai_file(path: &Path, relative: &str, draft: Option<&str>) -> Result<
 }
 
 #[tauri::command]
-pub async fn editor_export(app: tauri::AppHandle, project_id: String, expected_root: String, path: String, mode: String, draft: Option<String>) -> Result<Export, String> {
-    if !["file", "folder", "tree", "validate"].contains(&mode.as_str()) { return Err("Unknown copy action.".into()); }
+pub async fn editor_export(app: tauri::AppHandle, project_id: String, expected_root: String, path: String, mode: String, draft: Option<String>, budget: Option<usize>) -> Result<Export, String> {
+    if !["file", "folder", "tree", "validate", "attachment", "copy-file", "copy-folder", "copy-slice", "name", "relative", "full"].contains(&mode.as_str()) { return Err("Unknown copy action.".into()); }
     tauri::async_runtime::spawn_blocking(move || {
         let (root, _root_guards) = resolve(&app, &project_id, &expected_root, "", true)?;
+        let budget = budget.unwrap_or(65_536);
+        if !COPY_BUDGETS.contains(&budget) { return Err("Unsupported clipboard budget.".into()); }
+        if matches!(mode.as_str(), "name" | "relative" | "full") {
+            let (target, _guards) = resolve(&app, &project_id, &expected_root, &path, false)?;
+            let text = match mode.as_str() {
+                "name" => target.file_name().unwrap_or_default().to_string_lossy().into_owned(),
+                "relative" => if path.is_empty() { ".".into() } else { path },
+                _ => readable_path(&target),
+            };
+            return Ok(Export { text, warnings: vec![], files: 0 });
+        }
         if mode == "validate" {
             let (target, _target_guards) = resolve(&app, &project_id, &expected_root, &path, false)?;
             validate_ai_file(&target, &path, draft.as_deref())?;
             return Ok(Export { text: String::new(), warnings: vec![], files: 1 });
         }
-        let (_target, _target_guards) = resolve(&app, &project_id, &expected_root, &path, mode != "file")?;
-        let mut result = export(&root, &path, &mode, draft.as_deref())?;
-        result.text = format!("PROJECT: {}\n{}", root.file_name().unwrap_or_default().to_string_lossy(), result.text);
+        let (_target, _target_guards) = resolve(&app, &project_id, &expected_root, &path, !matches!(mode.as_str(), "file" | "attachment" | "copy-file" | "copy-slice"))?;
+        let mut result = export_budget(&root, &path, &mode, draft.as_deref(), budget)?;
+        if !matches!(mode.as_str(), "attachment" | "copy-file" | "copy-folder" | "copy-slice") { result.text = format!("PROJECT: {}\n{}", root.file_name().unwrap_or_default().to_string_lossy(), result.text); }
         Ok(result)
     }).await.map_err(|e| e.to_string())?
 }
@@ -270,6 +349,80 @@ mod tests {
     impl Fixture { fn new() -> Self { let path = std::env::temp_dir().join(crate::project_storage::new_id("devflow-copy-test-").unwrap()); fs::create_dir(&path).unwrap(); Self(fs::canonicalize(path).unwrap()) } }
     impl Drop for Fixture { fn drop(&mut self) { let _ = fs::remove_dir_all(&self.0); } }
     #[test]
+    fn clipboard_tree_is_metadata_only_even_with_private_keys_and_invalid_ignore() {
+        let f = Fixture::new();
+        fs::write(f.0.join("guide.md"), "-----BEGIN PRIVATE KEY-----\nDO_NOT_READ").unwrap();
+        fs::write(f.0.join("image.bin"), [0, 255]).unwrap();
+        fs::write(f.0.join(".env"), "PRIVATE_VALUE").unwrap();
+        fs::write(f.0.join(".gitignore"), [0, 255]).unwrap();
+        fs::create_dir(f.0.join("node_modules")).unwrap();
+        let result = export(&f.0, "", "tree", None).unwrap();
+        for name in ["guide.md", "image.bin", ".env", ".gitignore"] { assert!(result.text.contains(name)); }
+        assert!(!result.text.contains("DO_NOT_READ")); assert!(!result.text.contains("PRIVATE_VALUE"));
+        assert_eq!(result.files, 4);
+    }
+    #[test]
+    fn clipboard_docs_and_placeholders_reuse_shared_policy() {
+        let f = Fixture::new();
+        let source = "Explain bearer authentication and authorization headers\nAuthorization: Bearer YOUR_TOKEN\nconst api_key = process.env.API_KEY;\n";
+        fs::write(f.0.join("guide.md"), source).unwrap();
+        let result = export_budget(&f.0, "guide.md", "copy-file", None, 16_384).unwrap();
+        assert!(result.text.contains(source)); assert!(result.warnings.is_empty());
+    }
+    #[test]
+    fn clipboard_sanitizes_source_and_drafts_without_modifying_disk() {
+        let f = Fixture::new();
+        let original = "const token = 'YOUR_TOKEN';\nconst password = 'actual-secret-value';\n";
+        fs::write(f.0.join("auth.ts"), original).unwrap();
+        let result = export_budget(&f.0, "auth.ts", "copy-file", None, 65_536).unwrap();
+        assert!(!result.text.contains("actual-secret-value")); assert!(result.text.contains("[redacted]"));
+        assert!(result.warnings[0].contains("[2]"));
+        assert_eq!(fs::read_to_string(f.0.join("auth.ts")).unwrap(), original);
+        let draft = "const password = 'draft-private-value';";
+        let result = export_budget(&f.0, "auth.ts", "copy-slice", Some(draft), 65_536).unwrap();
+        assert_eq!(result.text, "const password = '[redacted]';");
+        for unsafe_text in ["-----BEGIN PRIVATE KEY-----\nprivate-value", "api_key = \"\"\"private-value"] {
+            assert!(export_budget(&f.0, "auth.ts", "copy-slice", Some(unsafe_text), 65_536).is_err());
+        }
+        fs::write(f.0.join(".env"), "YOUR_TOKEN").unwrap();
+        assert!(export_budget(&f.0, ".env", "copy-file", None, 65_536).is_err());
+    }
+    #[test]
+    fn clipboard_utf8_budgets_include_fences_and_never_truncate() {
+        let f = Fixture::new();
+        fs::write(f.0.join("unicode.md"), "hello").unwrap();
+        for budget in COPY_BUDGETS {
+            let source = "λ".repeat(budget / 2);
+            assert!(export_budget(&f.0, "unicode.md", "copy-slice", Some(&source), budget).is_ok());
+            assert!(export_budget(&f.0, "unicode.md", "copy-file", Some(&source), budget).is_err());
+            assert!(export_budget(&f.0, "unicode.md", "copy-slice", Some(&(source + "x")), budget).is_err());
+        }
+        fs::write(f.0.join("unicode.md"), "x".repeat(300_000)).unwrap();
+        assert!(export_budget(&f.0, "unicode.md", "copy-file", None, 524_288).is_ok());
+        assert!(export_budget(&f.0, "unicode.md", "copy-file", None, 262_144).is_err());
+    }
+    #[test]
+    fn clipboard_folder_omits_whole_files_and_reports_paths() {
+        let f = Fixture::new();
+        fs::write(f.0.join("a.ts"), "const a = true;").unwrap();
+        fs::write(f.0.join("large.ts"), "x".repeat(17_000)).unwrap();
+        fs::write(f.0.join("auth.md"), "Authorization: Bearer AbCd01234567890123456789").unwrap();
+        let result = export_budget(&f.0, "", "copy-folder", None, 16_384).unwrap();
+        assert_eq!(result.files, 2); assert!(result.text.len() <= 16_384);
+        assert!(result.text.contains("large.ts: not included")); assert!(!result.text.contains(&"x".repeat(100)));
+        assert!(!result.text.contains("AbCd01234567890123456789")); assert!(!result.warnings.is_empty());
+        assert!(export_budget(&f.0, "../outside", "copy-folder", None, 16_384).is_err());
+    }
+    #[test]
+    fn clipboard_windows_paths_preserve_unc_and_normal_names() {
+        assert_eq!(readable_path(Path::new(r"\\?\C:\work\src\file.ts")), r"C:\work\src\file.ts");
+        assert_eq!(readable_path(Path::new(r"\\?\UNC\server\share\file.ts")), r"\\server\share\file.ts");
+        assert_eq!(readable_path(Path::new(r"\\server\share\file.ts")), r"\\server\share\file.ts");
+        for path in [r"\\?\C:\work\trailing.", r"\\?\C:\work\NUL", r"\\?\UNC\server\share\trailing "] {
+            assert_eq!(readable_path(Path::new(path)), path);
+        }
+    }
+    #[test]
     fn recursive_copy_filters_sensitive_ignored_generated_and_binary_files() {
         let f = Fixture::new();
         fs::create_dir(f.0.join("src")).unwrap(); fs::create_dir(f.0.join("node_modules")).unwrap();
@@ -281,6 +434,23 @@ mod tests {
         assert!(export(&f.0, "src/omit.ts", "file", None).is_err());
         assert!(export(&f.0, ".env", "file", None).is_err());
         assert!(export(&f.0, "src/Header.tsx", "file", Some("api_key='blocked'")).is_err());
+    }
+    #[test]
+    fn context_safety_attachment_sanitizes_without_disk_changes_and_blocks_sensitive_files() {
+        let f = Fixture::new();
+        let original = "Authorization: Bearer AbCd01234567890123456789\nnext();\n";
+        fs::write(f.0.join("auth.md"), original).unwrap();
+        let result = export(&f.0, "auth.md", "attachment", None).unwrap();
+        assert_eq!(result.text, "Authorization: Bearer [redacted]\nnext();\n");
+        assert!(result.warnings[0].contains("[1]"));
+        assert_eq!(fs::read_to_string(f.0.join("auth.md")).unwrap(), original);
+        for path in [".env", "private.key", "credentials.json", "id_rsa"] {
+            fs::write(f.0.join(path), "YOUR_TOKEN").unwrap();
+            assert!(export(&f.0, path, "attachment", None).is_err());
+        }
+        fs::write(f.0.join("auth.md"), "-----BEGIN PRIVATE KEY-----\nprivate-value").unwrap();
+        assert!(export(&f.0, "auth.md", "attachment", Some("safe draft")).is_err());
+        assert!(export(&f.0, "../auth.md", "attachment", None).is_err());
     }
     #[test]
     fn nested_ignore_negation_and_ignored_parent_are_respected() {

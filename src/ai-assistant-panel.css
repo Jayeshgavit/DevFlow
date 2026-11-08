@@ -1010,7 +1010,6 @@
 .qe-ai-checked-model.is-unavailable { color: var(--danger); }
 .qe-ai-checked-model[aria-pressed=true] { border-color: var(--focus); background: var(--surface-soft); }
 .qe-ai-checked-model:hover:not(:disabled) { background: var(--surface-soft); }
-.qe-ai-header { max-height: 48%; overflow-y: auto; scrollbar-width: thin; }
 
 .qe-ai-provider-options { display:flex; flex-wrap:wrap; align-items:center; gap:6px 10px; color:var(--text-muted); font:10px/1.4 var(--font-ui); }
 .qe-ai-provider-options label { display:inline-flex; align-items:center; gap:4px; }
@@ -1031,9 +1030,6 @@
 
 .qe-ai-header { position: relative; }
 .qe-ai-settings { position: static; max-height: none; overflow: visible; }
-.qe-ai-settings > summary { position: absolute; top: 8px; right: 35px; font-size: 11px; }
-.qe-ai-header-actions { padding-right: 62px; }
-.qe-ai-settings[open] { max-height: 45vh; overflow-y: auto; padding: 8px; border: 1px solid var(--border-soft); background: var(--surface-raised); }
 .qe-ai-field-label, .qe-ai-attachments-top { display: none; }
 .qe-ai-message-area { overscroll-behavior: contain; scrollbar-width: thin; }
 .qe-ai-markdown { font-size: 13px; line-height: 1.7; overflow-wrap: anywhere; }
@@ -1150,10 +1146,6 @@
 .qe-ai-attachment-preview summary span:first-child { white-space: normal; overflow: visible; overflow-wrap: anywhere; }
 .qe-ai-attachments > p { flex-basis: 100%; margin: 2px 0; font: 10px/1.4 var(--font-ui); color: var(--text-muted); }
 .qe-ai-attachment-preview pre { max-height: none; overflow: visible; }
-.qe-ai-header { min-height: 0; max-height: 30%; overflow-y: auto; box-sizing: border-box; }
-.qe-ai-header .qe-ai-configuration-controls { max-height: none; overflow: visible; }
-.qe-ai-panel > details { max-height: 18%; min-height: 28px; box-sizing: border-box; }
-.qe-ai-composer { max-height: 40%; min-height: 110px; min-width: 0; overflow-x: hidden; }
 .qe-ai-attachments > button { background: transparent; border: 0; color: var(--text-muted); font: 10px var(--font-ui); cursor: pointer; }
 .qe-ai-attach-options .qe-ai-file-list { max-height: none; overflow: visible; }
 
@@ -1198,7 +1190,6 @@
 .qe-ai-attachment-preview pre { max-height: 130px; overflow: auto; }
 .qe-ai-review-context { flex-basis: 100%; margin: 2px 0; font: 10px/1.5 var(--font-ui); }
 .qe-ai-input-wrap, .qe-ai-composer-footer { flex-shrink: 0; }
-.qe-ai-composer { overflow-y: hidden; }
 .qe-ai-attachments { flex: 0 1 auto; min-height: 34px; overflow-y: auto; }
 .qe-ai-mode-control { order: -1; flex: none; }
 .qe-ai-mode-control select { max-width: 112px; min-height: 28px; padding: 2px 5px; border: 1px solid var(--border-soft); border-radius: var(--radius-sm); background: var(--surface); color: var(--text); font: 500 11px var(--font-ui); }
@@ -1212,4 +1203,128 @@
   .qe-ai-header-top { flex-wrap: wrap; gap: 5px; }
   .qe-ai-header-actions { margin-left: auto; }
   .qe-ai-composer-footer { flex-wrap: wrap; gap: 6px; }
+}
+
+/* Conversation-first workbench. Existing semantic tokens serve both themes.
+ * Hallmark · pre-emit critique: P5 H5 E4 S5 R5 V4
+ * Fixed header/model strip, flexible scrollport, unified composer.
+ */
+.qe-ai-panel { min-height: 0; }
+.qe-ai-header { position: static; padding: 6px 10px; gap: 0; max-height: none; overflow: visible; background: var(--surface); border-bottom: 0; }
+.qe-ai-header-top { flex-wrap: nowrap; min-height: 30px; gap: 4px; }
+.qe-ai-title { min-width: 0; gap: 5px; }
+.qe-ai-title h2 { font-size: 13px; }
+.qe-ai-header-actions { flex: none; flex-wrap: nowrap; padding: 0; gap: 1px; }
+.qe-ai-header-actions .qe-ai-btn-quiet { font-size: 11px; }
+.qe-ai-header-popover > summary { display: flex; align-items: center; justify-content: center; width: 28px; min-height: 30px; color: var(--text-muted); border-radius: var(--radius-sm); cursor: pointer; list-style: none; }
+.qe-ai-panel summary::-webkit-details-marker { display: none; }
+.qe-ai-header-popover > summary:hover, .qe-ai-header-popover[open] > summary { background: var(--surface-soft); color: var(--text); }
+.qe-ai-popover-content, .qe-ai-attach-options, .qe-ai-configuration-controls {
+  box-sizing: border-box; border: 1px solid var(--border-soft); border-radius: var(--radius-md);
+  background: var(--surface-raised); color: var(--text); box-shadow: var(--shadow);
+  overscroll-behavior: contain; scrollbar-width: thin; overflow-wrap: anywhere;
+}
+.qe-ai-header-popover > .qe-ai-popover-content {
+  position: absolute; inset: 42px 8px auto; z-index: 12;
+  max-height: min(65%, 440px); padding: 12px; overflow: auto;
+  display: flex; flex-direction: column; align-items: stretch; gap: 8px;
+  font: 12px/1.5 var(--font-ui);
+}
+.qe-ai-popover-content p { margin: 0; color: var(--text-muted); }
+.qe-ai-history input { width: 100%; box-sizing: border-box; min-width: 0; padding: 8px; border: 1px solid var(--border-soft); border-radius: var(--radius-sm); background: var(--surface-input); color: var(--text); font: inherit; }
+.qe-ai-history .qe-ai-popover-content > div { padding-block: 8px; border-top: 1px solid var(--border-soft); }
+.qe-ai-history button { max-width: 100%; padding: 5px 7px; border: 1px solid transparent; border-radius: var(--radius-sm); color: var(--text-muted); background: transparent; font: 11px/1.5 var(--font-ui); text-align: left; overflow-wrap: anywhere; cursor: pointer; }
+.qe-ai-history button:hover:not(:disabled) { background: var(--surface-soft); color: var(--text); }
+.qe-ai-history .qe-ai-popover-content > div > button:first-child { display: block; width: 100%; color: var(--text); font-size: 12px; }
+.qe-ai-history .qe-ai-popover-content > button { order: 1; color: var(--danger); border-top-color: var(--border-soft); }
+.qe-ai-destructive-actions { padding-top: 8px; border-top: 1px solid var(--border-soft); }
+.qe-ai-destructive-actions button { color: var(--danger); }
+.qe-ai-more .guide-link { position: static; align-self: flex-start; }
+.qe-ai-configuration { flex: none; padding: 0 8px 6px; border-bottom: 1px solid var(--border-soft); }
+.qe-ai-configuration-summary { border: 0; background: transparent; min-height: 30px; padding: 4px 6px; }
+.qe-ai-configuration-selection { font: 500 12px/1.4 var(--font-ui); }
+.qe-ai-configuration-controls { position: absolute; inset: 78px 8px auto; z-index: 10; max-height: min(60%, 440px); padding: 12px; overflow: auto; }
+.qe-ai-configuration-controls[hidden] { display: none; }
+.qe-ai-settings > summary { position: static; padding: 8px 0; font: 500 12px var(--font-ui); cursor: pointer; }
+.qe-ai-settings[open] { max-height: none; overflow: visible; border: 0; padding: 0; background: transparent; }
+.qe-ai-controls-grid { grid-template-columns: minmax(0, 1fr); gap: 8px; }
+.qe-ai-select, .qe-ai-default-model > div > span { font-size: 12px; }
+.qe-ai-field-label { display: block; font: 500 11px var(--font-ui); letter-spacing: 0; text-transform: none; }
+.qe-ai-research-status { flex: none; margin: 0; padding: 5px 12px; font: 12px/1.45 var(--font-ui); overflow-wrap: anywhere; }
+.qe-ai-panel > p[role=alert] { flex: none; margin: 0; padding: 6px 12px; color: var(--danger); font: 12px/1.45 var(--font-ui); overflow-wrap: anywhere; max-height: 20%; overflow: auto; }
+.qe-ai-message-area { padding: 16px 12px 8px; }
+.qe-ai-message-content:has(.qe-ai-empty) { min-height: 100%; display: flex; align-items: center; justify-content: center; }
+.qe-ai-empty { flex: 1; padding: 12px 4px; gap: 7px; max-width: 330px; }
+.qe-ai-empty-icon { width: 30px; height: 30px; margin: 0; border: 0; border-radius: var(--radius-sm); background: var(--surface-soft); }
+.qe-ai-empty-title { font: 600 15px/1.4 var(--font-heading); margin: 0; }
+.qe-ai-empty-desc { font: 12px/1.5 var(--font-ui); margin: 0; max-width: 30ch; }
+.qe-ai-suggestions { width: 100%; gap: 5px; margin-top: 6px; }
+.qe-ai-suggestion-chip { min-height: 30px; padding: 6px 10px; font-size: 12px; text-align: left; }
+.qe-ai-suggestion-chip:disabled { opacity: .5; cursor: not-allowed; }
+.qe-ai-message-actions { border-top: 0; padding: 0; margin-top: 2px; }
+.qe-ai-msg-copy-btn { font-size: 11px; }
+.qe-ai-message.is-user { max-width: 94%; }
+.qe-ai-scroll-controls:has(button) { padding: 3px 12px 6px; }
+
+/* All persistent input controls share one surface; transient controls overlay
+   only on request and never change the scrollport's ownership. */
+.qe-ai-composer { position: static; flex: none; margin: 6px 8px 8px; padding: 0; min-height: 0; max-height: none; overflow: visible; border: 1px solid var(--border-soft); border-radius: var(--radius-md); background: var(--surface-input); }
+.qe-ai-composer:focus-within { border-color: var(--focus); box-shadow: 0 0 0 1px var(--focus); }
+.qe-ai-input-wrap { padding: 0; }
+.qe-ai-textarea { display: block; min-height: 62px; max-height: min(20vh, 140px); padding: 10px 11px 4px; resize: none; border: 0; border-radius: var(--radius-md); background: transparent; font: 13px/1.5 var(--font-ui); overflow-y: auto; }
+.qe-ai-textarea:focus-visible { outline: 0; }
+.qe-ai-composer-footer { display: flex; flex-wrap: nowrap; justify-content: flex-start; padding: 4px 5px 5px; gap: 2px; }
+.qe-ai-toolbar-spacer { flex: 1; min-width: 0; }
+.qe-ai-mode-control { order: 0; min-width: 0; }
+.qe-ai-mode-control select { width: 82px; max-width: 100%; min-height: 30px; border-color: transparent; background: transparent; font-size: 12px; }
+.qe-ai-attach-menu { order: 0; flex: none; }
+.qe-ai-attach-menu[open] { flex-basis: auto; }
+.qe-ai-attach-menu > summary, .qe-ai-budget-info > summary { display: flex; align-items: center; justify-content: center; gap: 3px; min-height: 30px; padding: 2px 4px; box-sizing: border-box; list-style: none; cursor: pointer; color: var(--text-muted); font: 500 12px var(--font-ui); white-space: nowrap; border-radius: var(--radius-sm); }
+.qe-ai-attach-menu > summary:hover, .qe-ai-budget-info > summary:hover { background: var(--surface-soft); color: var(--text); }
+.qe-ai-attach-options, .qe-ai-budget-info > .qe-ai-popover-content { position: absolute; inset: auto 8px 64px; z-index: 12; max-height: min(60%, 420px); padding: 10px; overflow: auto; }
+.qe-ai-budget-info > .qe-ai-popover-content { display: grid; gap: 10px; font: 12px/1.5 var(--font-ui); }
+.qe-ai-budget-control select { min-height: 30px; padding: 4px 8px; border: 1px solid var(--border-soft); border-radius: var(--radius-sm); background: var(--surface); color: var(--text); font: 12px var(--font-ui); }
+.qe-ai-composer-footer > :is(.qe-ai-send-btn, .qe-ai-stop-btn) { min-height: 30px; padding: 4px 8px; }
+.qe-ai-composer-footer > :is(.qe-ai-send-btn, .qe-ai-stop-btn) > span { display: none; }
+.qe-ai-attachments { flex: none; min-height: 0; max-height: min(25vh, 200px); padding: 7px 8px 0; overflow: auto; }
+.qe-ai-context-summary .qe-ai-phase-tag { order: 0; font-size: 11px; }
+.qe-ai-attachment-list { max-height: none; overflow: visible; gap: 5px; }
+.qe-ai-selected-attachment { background: var(--surface-soft); }
+.qe-ai-attachment-preview summary { flex-wrap: nowrap; padding: 4px; gap: 6px; }
+.qe-ai-attachment-preview summary span:first-child { min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.qe-ai-attachment-preview summary span:last-child { flex: none; font-size: 10px; }
+.qe-ai-attachment-preview[open] summary span:first-child { white-space: normal; overflow-wrap: anywhere; }
+.qe-ai-review-context { font: 11px/1.5 var(--font-ui); }
+.qe-ai-composer > .qe-ai-phase-banner { margin: 0; border: 0; border-top: 1px solid var(--border-soft); max-height: 90px; overflow: auto; font-size: 12px; }
+.qe-ai-sanitize-dialog { box-sizing: border-box; width: min(600px, calc(100vw - 32px)); max-height: calc(100vh - 32px); padding: 20px; overflow: auto; background: var(--surface-raised); color: var(--text); border: 1px solid var(--border-soft); border-radius: var(--radius-md); box-shadow: var(--shadow); font: 13px/1.5 var(--font-ui); }
+.qe-ai-sanitize-dialog::backdrop { background: color-mix(in srgb, var(--bg) 75%, transparent); }
+.qe-ai-sanitize-dialog h3 { margin: 0; font: 600 16px var(--font-heading); }
+.qe-ai-sanitize-dialog pre { max-height: 45vh; padding: 10px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; background: var(--surface-soft); font: 12px/1.6 var(--font-mono); }
+.qe-ai-sanitize-dialog > div { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
+@container (min-width: 390px) {
+  .qe-ai-composer-footer { gap: 6px; }
+  .qe-ai-composer-footer > :is(.qe-ai-send-btn, .qe-ai-stop-btn) > span { display: inline; }
+}
+@container (max-width: 310px) {
+  .qe-ai-header { padding-inline: 7px; }
+  .qe-ai-title h2 { font-size: 12px; }
+  .qe-ai-header-actions .qe-ai-btn-quiet { padding-inline: 4px; }
+  .qe-ai-header-actions .qe-ai-btn-quiet > span { display: none; }
+  .qe-ai-header-actions button[aria-label="New chat"] { min-width: 28px; }
+  .qe-ai-mode-control select { width: 76px; }
+  .qe-ai-attach-menu > summary > svg:last-child { display: none; }
+}
+@media (max-height: 500px) {
+  .qe-ai-empty { padding-block: 4px; gap: 4px; }
+  .qe-ai-empty-icon { display: none; }
+  .qe-ai-empty-desc { margin-bottom: 3px; }
+  .qe-ai-suggestions { margin: 0; }
+  .qe-ai-textarea { min-height: 44px; max-height: 80px; }
+}
+@media (pointer: coarse) {
+  .qe-ai-header-popover > summary, .qe-ai-attach-menu > summary, .qe-ai-budget-info > summary, .qe-ai-mode-control select { min-height: 44px; }
+  .qe-ai-header-popover > .qe-ai-popover-content { top: 56px; }
+  .qe-ai-configuration-controls { top: 106px; }
+  .qe-ai-composer-footer { flex-wrap: wrap; }
+  .qe-ai-composer-footer > :is(.qe-ai-send-btn, .qe-ai-stop-btn) { margin-left: auto; min-height: 44px; }
 }

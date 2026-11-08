@@ -1,7 +1,7 @@
 import React, { useLayoutEffect, useRef } from 'react';
 import { createPortal } from 'react-dom';
 import { useMenuDismissal } from './menu-dismissal';
-export type MenuAction = { label: string; disabled?: boolean; run: () => void | Promise<void> };
+export type MenuAction = { label: string; title?: string; disabled?: boolean; run: () => void | Promise<void> };
 export function EditorContextMenu({ x, y, actions, close }: { x: number; y: number; actions: MenuAction[]; close: () => void }) {
   const menu = useRef<HTMLDivElement>(null);
   const previousFocus = useRef<HTMLElement | null>(document.activeElement instanceof HTMLElement ? document.activeElement : null);
@@ -23,7 +23,7 @@ export function EditorContextMenu({ x, y, actions, close }: { x: number; y: numb
     const index = controls.indexOf(document.activeElement as HTMLButtonElement);
     const next = event.key === 'Home' ? 0 : event.key === 'End' ? controls.length - 1 : (index + (event.key === 'ArrowDown' ? 1 : -1) + controls.length) % controls.length;
     event.preventDefault(); controls[next]?.focus();
-  }}>{actions.map(action => <button key={action.label} role="menuitem" disabled={action.disabled} onClick={() => { close(); void action.run(); }}>{action.label}</button>)}</div>, document.body);
+  }}>{actions.map(action => <button key={action.label} role="menuitem" title={action.title} disabled={action.disabled} onClick={() => { close(); void action.run(); }}>{action.label}</button>)}</div>, document.body);
 }
 
 export function EditorNameDialog({ title, initial, busy, error, submit, close, destination = '' }: { destination?: string; title: string; initial: string; busy: boolean; error: string; submit: (name: string, createParents: boolean) => void; close: () => void }) {

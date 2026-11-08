@@ -1,1 +1,1 @@
-{"identifier":"quick-editor","description":"Quick Editor native window events only; file access remains in guarded Rust commands","windows":["quick-editor"],"permissions":["core:default"]}
+{"identifier":"quick-editor","description":"Quick Editor native window events only; file access remains in guarded Rust commands","windows":["quick-editor"],"permissions":["core:default","core:window:allow-minimize"]}

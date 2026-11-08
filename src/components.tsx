@@ -1,13 +1,12 @@
 import React, { useDeferredValue, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { open } from '@tauri-apps/plugin-dialog';
-import { Activity, ArrowRight, Check, ChevronDown, Clipboard, Code2, Copy, Cpu, Download, FolderClosed, FolderOpen, FolderPlus, LayoutDashboard, PanelLeftClose, PanelLeftOpen, Moon, Pause, Pencil, Play, Plus, RotateCcw, Search, Settings2, ShieldCheck, Square, Sun, Terminal, Trash2, X } from 'lucide-react';
+import { Activity, ArrowRight, Boxes, ChartNoAxesCombined, Check, ChevronDown, Clipboard, Code2, Copy, Cpu, Download, FileCode2, FlaskConical, FolderKanban, FolderOpen, FolderPlus, LayoutDashboard, Network, PanelLeftClose, PanelLeftOpen, Moon, Pause, Pencil, Play, Plus, RotateCcw, ScrollText, Search, Settings2, Square, Sun, Terminal, Trash2, Wrench, X } from 'lucide-react';
 import type { HealthSnapshot, Project, RunOption, Service, ServiceHealthConfig, Theme, View } from './types';
 import type { BulkResult } from './bulk-actions';
 import { buildAiDebugPrompt, buildServiceOptions, errorContext, logCopyGroups, type LogCopyKind, parseErrorLocation, findLoopbackUrls, formatEntry, groupLogs, parseHttp, redactForSharing, remapServiceFilter, serviceGroup, summarizeGroups } from './log-utils';
 import { openErrorLocation, verifyErrorLocation } from './log-actions';
 import type { AnsiSpan, LogCategory, LogEntry, LogGroup } from './log-utils';
-import { MAX_PROJECT_LOGS, MAX_SERVICE_LOGS, MAX_SESSION_LOGS } from './log-utils';
 import { LogViewport } from './log-viewport';
 import { useMenuDismissal } from './menu-dismissal';
 import { serviceEndpoint } from './api-tester-state';
@@ -27,16 +26,16 @@ export function Status({ running, starting, stopping, outcome, error }: { runnin
   return <span className={`status status-${state}`}><span className="status-dot" />{label}</span>;
 }
 
-const navigation: { id: View; label: string; icon: React.ReactNode }[] = [
+const navigation: { id: View; label: string; title?: string; icon: React.ReactNode }[] = [
   { id: 'overview', label: 'Overview', icon: <LayoutDashboard size={18} /> },
-  { id: 'projects', label: 'Projects', icon: <FolderClosed size={18} /> },
-  { id: 'ports', label: 'Port Manager', icon: <Terminal size={18} /> },
-  { id: 'environment', label: 'Developer Environment', icon: <Terminal size={18} /> },
-  { id: 'logs', label: 'Logs', icon: <Terminal size={18} /> },
-  { id: 'api', label: 'API Tester', icon: <ArrowRight size={18} /> },
-  { id: 'editor', label: 'Quick Editor', icon: <Code2 size={18} /> },
-  { id: 'system', label: 'System Monitor', icon: <Cpu size={18} /> },
-  { id: 'maintenance', label: 'Maintenance', icon: <ShieldCheck size={18} /> },
+  { id: 'projects', label: 'Projects', icon: <FolderKanban size={18} /> },
+  { id: 'editor', label: 'Quick Editor', icon: <FileCode2 size={18} /> },
+  { id: 'ports', label: 'Port Manager', icon: <Network size={18} /> },
+  { id: 'api', label: 'API Tester', icon: <FlaskConical size={18} /> },
+  { id: 'environment', label: 'Environment', title: 'Developer Environment', icon: <Boxes size={18} /> },
+  { id: 'logs', label: 'Logs', icon: <ScrollText size={18} /> },
+  { id: 'system', label: 'System Monitor', icon: <ChartNoAxesCombined size={18} /> },
+  { id: 'maintenance', label: 'Maintenance', icon: <Wrench size={18} /> },
   { id: 'settings', label: 'Settings', icon: <Settings2 size={18} /> },
 ];
 
@@ -45,16 +44,22 @@ export function Sidebar({ view, setView, projects, selected, selectProject, runn
   runningCount: number; theme: Theme; setTheme: (theme: Theme) => void; importProject: () => void;
 }) {
   const [collapsed, setCollapsed] = useState(() => { try { return localStorage.getItem('devflow-sidebar-collapsed') === 'true'; } catch { return false; } });
+  const [projectSearchOpen, setProjectSearchOpen] = useState(false);
+  const currentProject = projects.find(project => project.id === selected);
+  const renderNavigation = (items: typeof navigation) => items.map(item => <button key={item.id} aria-label={item.title ?? item.label} title={item.title ?? item.label} className={`nav-item ${view === item.id ? 'is-active' : ''}`} aria-current={view === item.id ? 'page' : undefined} onClick={() => setView(item.id)}>{item.icon}<span>{item.label}</span>{item.id === 'logs' && runningCount > 0 && <span className="nav-count">{runningCount}</span>}</button>);
   return <aside className={`sidebar ${collapsed ? 'is-collapsed' : ''}`} aria-label="Main navigation">
     <button className="sidebar-toggle" aria-label={collapsed ? 'Expand navigation' : 'Collapse navigation'} title={collapsed ? 'Expand navigation' : 'Collapse navigation'} aria-expanded={!collapsed} onClick={() => { setCollapsed(!collapsed); try { localStorage.setItem('devflow-sidebar-collapsed', String(!collapsed)); } catch { /* Optional preference. */ } }}>{collapsed ? <PanelLeftOpen size={18} /> : <PanelLeftClose size={18} />}</button>
     <div className="brand"><span className="brand-mark"><Activity size={21} strokeWidth={2.5} /></span><span className="brand-name">DevFlow<span className="brand-period">.</span></span><span className="brand-tag">BETA</span></div>
-    <div className="sidebar-section-label">WORKSPACE</div>
-    <nav className="nav-list" aria-label="Views">{navigation.map(item => <button key={item.id} aria-label={item.label} title={item.label} className={`nav-item ${view === item.id ? 'is-active' : ''}`} aria-current={view === item.id ? 'page' : undefined} onClick={() => setView(item.id)}>{item.icon}<span>{item.label}</span>{item.id === 'logs' && runningCount > 0 && <span className="nav-count">{runningCount}</span>}</button>)}</nav>
-    <div className="sidebar-divider" />
+    <nav className="sidebar-navigation" aria-label="Views">
+      {[{ label: 'WORKSPACE', start: 0, end: 3 }, { label: 'DEVELOPER TOOLS', start: 3, end: 6 }, { label: 'MONITORING & SYSTEM', start: 6, end: 9 }].map(group => <div className="sidebar-nav-group" key={group.label}><div className="sidebar-section-label">{group.label}</div><div className="nav-list">{renderNavigation(navigation.slice(group.start, group.end))}</div></div>)}
+    </nav>
+    <div className="sidebar-project-access">
     <div className="sidebar-section-label sidebar-project-label"><span>YOUR PROJECTS</span><span>{projects.length}</span></div>
-    <div className="sidebar-projects">{projects.length === 0 ? <p className="sidebar-empty">No projects yet</p> : projects.map(project => <button key={project.id} aria-label={project.name} title={project.name} className={`sidebar-project ${selected === project.id && view === 'projects' ? 'is-selected' : ''}`} onClick={() => { selectProject(project.id); setView('projects'); }}><span className="project-initial">{project.name.slice(0, 1).toUpperCase()}</span><span className="sidebar-project-name">{project.name}</span><span className="sidebar-project-count">{project.services.length}</span></button>)}</div>
+    {projects.length === 0 ? <p className="sidebar-empty">No projects yet</p> : <button className={`sidebar-project ${currentProject ? 'is-selected' : ''}`} aria-label={`Switch project${currentProject ? `: ${currentProject.name}` : ''}`} title={`Switch project${currentProject ? `: ${currentProject.name}` : ''}`} aria-haspopup="dialog" aria-expanded={projectSearchOpen} onClick={() => setProjectSearchOpen(true)}><span className="project-initial">{currentProject ? currentProject.name.slice(0, 1).toUpperCase() : <FolderKanban size={18} />}</span><span className="sidebar-project-name">{currentProject?.name ?? 'Choose project'}</span><ChevronDown className="sidebar-project-chevron" size={13} /></button>}
     <Button aria-label="Add project" title="Add project" className="sidebar-import" tone="quiet" icon={<Plus size={16} />} onClick={importProject}>Add project</Button>
-    <div className="sidebar-bottom"><button className="theme-shortcut" onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')} title={`Switch to ${theme === 'dark' ? 'light' : 'dark'} theme`}>{theme === 'dark' ? <Sun size={17} /> : <Moon size={17} />}<span>{theme === 'system' ? 'System theme' : `${theme[0].toUpperCase()}${theme.slice(1)} theme`}</span></button><div className="local-note"><span className="local-dot" /> Local workspace</div></div>
+    </div>
+    <div className="sidebar-bottom">{renderNavigation(navigation.slice(9))}<button className="theme-shortcut" onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')} title={`Switch to ${theme === 'dark' ? 'light' : 'dark'} theme`}>{theme === 'dark' ? <Sun size={17} /> : <Moon size={17} />}<span>{theme === 'system' ? 'System theme' : `${theme[0].toUpperCase()}${theme.slice(1)} theme`}</span></button><div className="local-note"><span className="local-dot" /> Local workspace</div></div>
+    {projectSearchOpen && <QuickSearchDialog projects={projects} selectionOnly onSelect={id => { selectProject(id); setProjectSearchOpen(false); }} onCancel={() => setProjectSearchOpen(false)} />}
   </aside>;
 }
 
@@ -62,10 +67,11 @@ export function EmptyState({ icon, title, description, action }: { icon: React.R
   return <div className="empty-state"><span className="empty-icon">{icon}</span><h3>{title}</h3><p>{description}</p>{action}</div>;
 }
 
-export function QuickSearchDialog({ projects, onSelect, onCancel }: {
+export function QuickSearchDialog({ projects, onSelect, onCancel, selectionOnly = false }: {
   projects: Project[];
   onSelect: (projectId: string) => void;
   onCancel: () => void;
+  selectionOnly?: boolean;
 }) {
   const [query, setQuery] = useState('');
   const inputRef = useRef<HTMLInputElement>(null);
@@ -93,8 +99,8 @@ export function QuickSearchDialog({ projects, onSelect, onCancel }: {
     <div ref={dialogRef} className="dialog quick-search-dialog" role="dialog" aria-modal="true" aria-labelledby="quick-search-title">
       <button className="dialog-close icon-button" aria-label="Close quick search" onClick={onCancel}><X size={18} /></button>
       <div className="dialog-symbol"><Search size={22} /></div>
-      <h2 id="quick-search-title">Find a project or service</h2>
-      <p>Choose a result to open its project workspace. Nothing is started or changed.</p>
+      <h2 id="quick-search-title">{selectionOnly ? 'Switch project' : 'Find a project or service'}</h2>
+      <p>{selectionOnly ? 'Choose a project without leaving the current page. No services are started.' : 'Choose a result to open its project workspace. Nothing is started or changed.'}</p>
       <label className="quick-search-input"><Search size={16} /><span className="sr-only">Search projects and services</span><input ref={inputRef} value={query} onChange={event => setQuery(event.target.value)} placeholder="Project, service, or path" /></label>
       <div className="quick-search-results" role="listbox" aria-label="Project and service results">
         {matches.length ? matches.map(({ project, serviceName }) => <button key={`${project.id}:${serviceName}`} type="button" role="option" className="quick-search-result" onClick={() => onSelect(project.id)}><span><strong>{serviceName || project.name}</strong><small>{serviceName ? `${project.name} · service` : project.root}</small></span><ArrowRight size={15} /></button>) : <p className="quick-search-empty">No matching project or service.</p>}
@@ -130,10 +136,10 @@ export function FloatingMenu({ label, icon, triggerClassName = 'button button-se
       setPosition({ top: Math.max(8, top), left: Math.max(8, Math.min(left, window.innerWidth - bounds.width - 8)), maxHeight });
     };
     update();
-    panel.current.querySelector<HTMLElement>('button:not(:disabled), input:not(:disabled), select:not(:disabled)')?.focus({ preventScroll: true });
+    panel.current.querySelector<HTMLElement>('summary, button:not(:disabled), input:not(:disabled), select:not(:disabled)')?.focus({ preventScroll: true });
     const onKeyDown = (event: KeyboardEvent) => {
       if (panel.current?.contains(document.activeElement) && ['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key) && !(event.target instanceof HTMLInputElement) && !(event.target instanceof HTMLSelectElement)) {
-        const controls = [...panel.current.querySelectorAll<HTMLElement>('button:not(:disabled), input:not(:disabled), select:not(:disabled)')];
+        const controls = [...panel.current.querySelectorAll<HTMLElement>('summary, button:not(:disabled), input:not(:disabled), select:not(:disabled)')].filter(element => element.getClientRects().length > 0);
         const index = controls.indexOf(document.activeElement as HTMLElement);
         const next = event.key === 'Home' ? 0 : event.key === 'End' ? controls.length - 1 : (index + (event.key === 'ArrowDown' ? 1 : -1) + controls.length) % controls.length;
         event.preventDefault(); controls[next]?.focus();
@@ -224,7 +230,10 @@ export function ServiceHealthPanel({ service, running, locked, config, health, o
   return <div className="service-health-panel"><div className="service-health-panel__summary"><span className={`service-health-panel__status service-health-panel__status--${status}`}><i aria-hidden="true" />{statusLabel}</span><span>{detail}{checkedAt}</span><Button tone="quiet" disabled={locked || !running || !config.enabled} onClick={onCheckNow}>Check now</Button></div><details><summary>HTTP health check configuration</summary><div className="service-health-panel__fields"><label><span>Monitor HTTP</span><input type="checkbox" checked={config.enabled} disabled={locked} onChange={event => onChange({ enabled: event.target.checked })} /></label><label>HOST<input value={config.host} disabled={locked} onChange={event => onChange({ host: event.target.value })} spellCheck={false} /></label><label>PORT<input type="number" min="1" max="65535" value={config.port ?? ''} disabled={locked} onChange={event => onChange({ port: event.target.value ? Number(event.target.value) : undefined })} /></label><label>PATH<input value={config.path} disabled={locked} onChange={event => onChange({ path: event.target.value })} spellCheck={false} /></label><label>INTERVAL <span className="label-hint">SECONDS</span><input type="number" min="1" max="3600" value={config.intervalSeconds} disabled={locked} onChange={event => onChange({ intervalSeconds: Number(event.target.value) || 10 })} /></label><label>TIMEOUT <span className="label-hint">SECONDS</span><input type="number" min="1" max="30" value={config.timeoutSeconds} disabled={locked} onChange={event => onChange({ timeoutSeconds: Number(event.target.value) || 2 })} /></label><label>EXPECTED STATUS MIN<input type="number" min="100" max="599" value={config.expectedStatusMin} disabled={locked} onChange={event => onChange({ expectedStatusMin: Number(event.target.value) || 200 })} /></label><label>EXPECTED STATUS MAX<input type="number" min="100" max="599" value={config.expectedStatusMax} disabled={locked} onChange={event => onChange({ expectedStatusMax: Number(event.target.value) || 399 })} /></label></div><p className="service-detection-note">Only loopback HTTP endpoints are checked. Health failures never stop or restart the process.</p></details></div>;
 }
 
-const MessageText = React.memo(function MessageText({ message, ansiSpans = [], slowMs, onOpenUrl }: { message: string; ansiSpans?: AnsiSpan[]; slowMs: number; onOpenUrl: (url: string) => void }) {
+const MessageText = React.memo(function MessageText({ message: rawMessage, ansiSpans: rawSpans = [], slowMs, onOpenUrl }: { message: string; ansiSpans?: AnsiSpan[]; slowMs: number; onOpenUrl: (url: string) => void }) {
+  const message = useMemo(() => redactForSharing(rawMessage), [rawMessage]);
+  // Masking changes offsets: never apply original color spans to different text.
+  const ansiSpans = message === rawMessage ? rawSpans : [];
   const http = useMemo(() => parseHttp(message), [message]);
   const semanticSpans = useMemo(() => {
     if (http) return http.spans;
@@ -285,7 +294,8 @@ function ErrorEditorAction({ project, message }: { project: Project; message: st
   return <>{verified && <button title={`Open in Quick Editor: ${location!.path}:${location!.line}`} aria-label="Open in Quick Editor" onClick={() => { void openErrorLocation(project, location!).then(() => setError('')).catch(cause => setError(String(cause))); }}><Code2 size={14} /></button>}{error && <span role="alert">{error}</span>}</>;
 }
 
-export function LogViewer({ focusIncident, project, logs, filter, setFilter, search, setSearch, searchRef, autoScroll, setAutoScroll, onCopy, onExport, onClear, onOpenUrl, actionMessage, serviceControls, onAttachLogs, onCheckedLogsChange }: {
+export function LogViewer({ compact = false, focusIncident, project, logs, filter, setFilter, search, setSearch, searchRef, autoScroll, setAutoScroll, onCopy, onExport, onClear, onOpenUrl, actionMessage, serviceControls, onAttachLogs, onCheckedLogsChange }: {
+  compact?: boolean;
   focusIncident?: { incidentId: string; request: number };
   project: Project; logs: LogEntry[]; filter: string; setFilter: (value: string) => void; search: string; setSearch: (value: string) => void;
   searchRef?: React.RefObject<HTMLInputElement>;
@@ -299,6 +309,7 @@ export function LogViewer({ focusIncident, project, logs, filter, setFilter, sea
   const [activeIssue, setActiveIssue] = useState<LogEntry | null>(null);
   const [issueRequest, setIssueRequest] = useState(0);
   const [visibleGroups, setVisibleGroups] = useState<LogGroup[]>([]);
+  const [atLatest, setAtLatest] = useState(true);
   const [selectedRows, setSelectedRows] = useState(new Set<LogEntry>());
   const [confirmation, setConfirmation] = useState<{ title: string; description: string; confirmText: string; action: () => void; destructive?: boolean }>();
   const [actionBusy, setActionBusy] = useState(false);
@@ -397,6 +408,12 @@ export function LogViewer({ focusIncident, project, logs, filter, setFilter, sea
     });
   }, [searched, categoryFilter]);
   const stats = useMemo(() => summarizeGroups(filtered), [filtered]);
+  const navigateMatch = (direction: number) => {
+    if (!deferredSearch.trim() || !filtered.length) return;
+    const current = filtered.findIndex(group => group.entries[0] === activeIssue);
+    const index = current < 0 ? (direction > 0 ? 0 : filtered.length - 1) : (current + direction + filtered.length) % filtered.length;
+    setAutoScroll(false); setActiveIssue(filtered[index].entries[0]); setIssueRequest(value => value + 1);
+  };
   const categoryStats = useMemo(() => summarizeGroups(searched), [searched]);
   const navigateIssue = (category: 'error' | 'warning', direction: number) => {
     const indices = filtered.flatMap((group, index) => group.category === category ? [index] : []);
@@ -446,9 +463,9 @@ export function LogViewer({ focusIncident, project, logs, filter, setFilter, sea
       <span className={`log-stream stream-${first.stream}`}>{first.incidentId ? 'DevFlow' : first.stream}</span>
       <div className="log-row-content"><input className="log-select-row" type="checkbox" aria-label={`Select log entry from ${serviceNames.get(first.serviceId) || first.serviceId} at ${logTime.format(first.receivedAt)}`} checked={group.entries.every(entry => selectedRows.has(entry))} onChange={event => { const checked = event.target.checked; setSelectedRows(current => { const next = new Set(current); group.entries.forEach(entry => checked ? next.add(entry) : next.delete(entry)); return next; }); }} />{group.repeatCount > 1 && <span className="log-repeat-summary" title={`First: ${new Date(first.receivedAt).toLocaleString()} · Latest: ${new Date(group.latestAt).toLocaleString()}`}>Repeated {group.repeatCount.toLocaleString()} times · latest {logTime.format(group.latestAt)}</span>}
         {group.entries.length > 1 ? <details className="log-stack-details" open={expanded} onToggle={event => { const next = event.currentTarget.open; if (next === expandedStacks.current.has(first)) return; if (next) expandedStacks.current.add(first); else expandedStacks.current.delete(first); setStackRevision(value => value + 1); }}><summary><span className="log-level">{group.category}</span><MessageText message={first.message} ansiSpans={first.ansiSpans} slowMs={slowMs} onOpenUrl={onOpenUrl} /><span className="stack-line-count">{group.repeatCount > 1 ? `${group.repeatCount.toLocaleString()} repeats · first + latest sample` : `${group.entries.length} lines · expand stack`}</span></summary>{expanded && <pre className="log-message"><MessageText message={text.message} ansiSpans={text.ansiSpans} slowMs={slowMs} onOpenUrl={onOpenUrl} /></pre>}</details> : <div className="log-message"><span className="log-level">{group.category}</span><MessageText message={text.message} ansiSpans={text.ansiSpans} slowMs={slowMs} onOpenUrl={onOpenUrl} /></div>}
-        {groupDetails && <div className="http-meta"><span className="http-method">{groupDetails.method}</span><span className="http-endpoint">{groupDetails.endpoint}</span><span className={`http-status is-${statusKind}`}>{groupDetails.status}</span>{groupDetails.durationMs !== undefined && <span className={`http-duration${groupDetails.durationMs >= slowMs ? ' is-slow' : ''}`}>{groupDetails.durationMs < 1000 ? `${Math.round(groupDetails.durationMs)} ms` : `${(groupDetails.durationMs / 1000).toFixed(2)} s`}{groupDetails.durationMs >= slowMs ? ' · slow' : ''}</span>}</div>}
+        {groupDetails && <div className="http-meta"><span className="http-method">{groupDetails.method}</span><span className="http-endpoint">{redactForSharing(groupDetails.endpoint)}</span><span className={`http-status is-${statusKind}`}>{groupDetails.status}</span>{groupDetails.durationMs !== undefined && <span className={`http-duration${groupDetails.durationMs >= slowMs ? ' is-slow' : ''}`}>{groupDetails.durationMs < 1000 ? `${Math.round(groupDetails.durationMs)} ms` : `${(groupDetails.durationMs / 1000).toFixed(2)} s`}{groupDetails.durationMs >= slowMs ? ' · slow' : ''}</span>}</div>}
       </div>
-      <div className="log-row-actions"><button disabled={actionBusy} className={`log-copy-row${copiedRow === copyId ? ' is-copied' : ''}`} aria-label={`Copy ${group.category === 'error' ? 'error block' : 'log entry'} from ${serviceNames.get(first.serviceId) || first.serviceId}`} title={copiedRow === copyId ? 'Copied' : 'Copy log entry'} onClick={() => { void complete(async () => { const success = await copy([group], 'Log entry copied'); if (success) { setCopiedRow(copyId); window.setTimeout(() => setCopiedRow(''), 1300); } return success; }); }}>{copiedRow === copyId ? <Check size={14} /> : <Copy size={14} />}</button>{group.category === 'error' && <><button disabled={actionBusy} aria-label="Copy error with context" title="Copy error with nearby context (up to 200 lines)" onClick={() => void complete(() => copy([group], 'Error with context copied', true))}><Clipboard size={14} /></button><ErrorEditorAction project={project} message={group.sample.map(entry => entry.message).join('\n')} /></>}</div>
+      <div className="log-row-actions"><button disabled={actionBusy} className={`log-copy-row${copiedRow === copyId ? ' is-copied' : ''}`} aria-label={`Copy ${group.category === 'error' ? 'error block' : 'log entry'} from ${serviceNames.get(first.serviceId) || first.serviceId}`} title={copiedRow === copyId ? 'Copied' : 'Copy log entry'} onClick={() => { void complete(async () => { const success = await copy([group], 'Log entry copied'); if (success) { setCopiedRow(copyId); window.setTimeout(() => setCopiedRow(''), 1300); } return success; }); }}>{copiedRow === copyId ? <Check size={14} /> : <Copy size={14} />}</button>{group.category === 'error' && <><ErrorEditorAction project={project} message={group.sample.map(entry => entry.message).join('\n')} /></>}</div>
     </div>;
   };
 
@@ -457,25 +474,18 @@ export function LogViewer({ focusIncident, project, logs, filter, setFilter, sea
     if (event.key === 'F8') { event.preventDefault(); event.stopPropagation(); navigateIssue(event.altKey ? 'warning' : 'error', event.shiftKey ? -1 : 1); }
     if (event.key === 'Escape' && event.target === inputRef.current && search) { event.preventDefault(); event.stopPropagation(); setSearch(''); }
   }}><Card className={`log-panel developer-console${showTime ? '' : ' hide-log-time'}${showService ? '' : ' hide-log-service'}`}>
-    {serviceControls}
+    {!compact && serviceControls}
     <div className="console-toolbar" aria-label="Console controls">
+      {compact && serviceControls && <details className="console-process-details"><summary title="Service state and user-initiated process controls">Processes</summary><div>{serviceControls}</div></details>}
       <label className="console-service"><span className="sr-only">Service log filter</span><select value={filter} onChange={event => { setAutoScroll(false); setActiveIssue(null); setFilter(event.target.value); }}>{serviceOptions.map(option => <option key={option.value} value={option.value}>{option.label}</option>)}</select></label>
-      <label className="search-field console-search"><Search size={15} /><span className="sr-only">Search logs</span><input ref={inputRef} value={search} onChange={event => { setAutoScroll(false); setActiveIssue(null); setSearch(event.target.value); }} placeholder="Search output…" aria-keyshortcuts="Control+f" /><kbd>Ctrl F</kbd></label>
-      <Button tone="quiet" aria-label={autoScroll ? 'Pause following output' : 'Follow latest output'} aria-pressed={autoScroll} icon={autoScroll ? <Pause size={14} /> : <Play size={14} />} onClick={() => { setActiveIssue(null); setAutoScroll(!autoScroll); }}>{autoScroll ? 'Pause' : 'Follow'}</Button>
-      <FloatingMenu label="Options" icon={<Settings2 size={15} />} triggerClassName="button button-quiet" align="end" panelRole="dialog">{close => <div className="console-options">
-        <label>Font size <span>{fontSize}px</span><input aria-label="Log font size" type="range" min="10" max="22" step="1" value={fontSize} onChange={event => setFontSize(Number(event.target.value))} /></label>
-        <label className="console-check"><input type="checkbox" checked={wrap} onChange={event => setWrap(event.target.checked)} />Wrap lines</label>
-        <label className="console-check"><input type="checkbox" checked={showTime} onChange={event => setShowTime(event.target.checked)} />Show timestamps</label>
-        <label className="console-check"><input type="checkbox" checked={showService} onChange={event => setShowService(event.target.checked)} />Show service labels</label>
-        <button onClick={() => { resetFilters(); close(); }}>Clear filters</button>
-        <label>Stream<select value={streamFilter} onChange={event => { setAutoScroll(false); setActiveIssue(null); setStreamFilter(event.target.value); }}><option value="all">All streams</option><option value="stdout">stdout</option><option value="stderr">stderr</option><option value="system">system</option></select></label>
-        <label>Slow request (ms)<input aria-label="Slow request threshold in milliseconds" type="number" min="0" max="600000" step="100" value={slowMs} onChange={event => setSlowMs(Math.min(600000, Math.max(0, Number(event.target.value) || 0)))} /></label>
-      </div>}</FloatingMenu>
+      <label className="search-field console-search"><Search size={15} /><span className="sr-only">Search logs</span><input ref={inputRef} value={search} onChange={event => { setAutoScroll(false); setActiveIssue(null); setSearch(event.target.value); }} placeholder="Search output…" aria-keyshortcuts="Control+f" />{search && <button type="button" title="Clear search" aria-label="Clear log search" onClick={() => { setSearch(''); inputRef.current?.focus(); }}><X size={13} /></button>}</label>
+      {search.trim() && <div className="console-match-nav" role="group" aria-label="Search matches"><span>{filtered.length} blocks</span><button title="Previous matching block" aria-label="Previous search match" disabled={!filtered.length} onClick={() => navigateMatch(-1)}>↑</button><button title="Next matching block" aria-label="Next search match" disabled={!filtered.length} onClick={() => navigateMatch(1)}>↓</button></div>}
+      <Button tone="quiet" title="Pauses visual following only; services keep running and output remains buffered" aria-label={autoScroll ? 'Pause following output' : 'Follow latest output'} aria-pressed={autoScroll} icon={autoScroll ? <Pause size={14} /> : <Play size={14} />} onClick={() => { setActiveIssue(null); setAutoScroll(!autoScroll); }}>{autoScroll ? 'Following' : 'Follow'}</Button>
       <FloatingMenu label="Copy" icon={<Clipboard size={15} />} triggerClassName="button button-quiet" align="end" autoClose={false} beforeOpen={() => setSelectionSnapshot(selection)}>{close => <>
         <button role="menuitem" disabled={actionBusy || !selectionSnapshot} onClick={() => void complete(() => onCopy(redactForSharing(selectionSnapshot), 'Selection copied'), close)}>Copy selection</button>
         <button role="menuitem" disabled={actionBusy || !checkedEntries.length} onClick={() => void complete(() => onCopy(formatEntries(checkedEntries), 'Selected lines copied'), close)}>Copy selected lines<span>{checkedEntries.length}</span></button>
         {onAttachLogs && <button role="menuitem" disabled={actionBusy || !checkedEntries.length} onClick={() => { close(); onAttachLogs(checkedEntries.slice(0, 100), `Selected logs · ${Math.min(checkedEntries.length, 100)} entries`); }}>Attach selected logs to AI<span>{Math.min(checkedEntries.length, 100)} entries</span></button>}
-        <button role="menuitem" disabled={actionBusy || !viewportGroups.length} onClick={() => void complete(() => copy(viewportGroups, 'Visible output copied'), close)}>Copy visible output</button>
+        <button role="menuitem" disabled={actionBusy || !viewportGroups.length} onClick={() => void complete(() => copy(viewportGroups, 'Visible blocks copied (including collapsed lines)'), close)}>Copy visible blocks<span>full block contents</span></button>
         {([['all', 'All combined logs'], ['frontend', 'Frontend logs'], ['backend', 'Backend logs'], ['errors', 'All errors'], ['frontend-errors', 'Frontend errors'], ['backend-errors', 'Backend errors'], ['current', 'Current filtered view']] as const).map(([kind, label]) => <button key={kind} role="menuitem" disabled={actionBusy || !selectionFor(kind).length} onClick={() => void complete(() => copy(selectionFor(kind), `${label} copied`), close)}>{label}<span>{selectionFor(kind).flatMap(group => group.entries).length}</span></button>)}
         <button role="menuitem" disabled={actionBusy || !viewportErrors.length} onClick={() => void complete(() => copy(viewportErrors, 'Visible errors copied'), close)}>Visible errors<span>{viewportErrors.flatMap(group => group.entries).length}</span></button>
         <button role="menuitem" disabled={actionBusy || !viewportWarnings.length} onClick={() => void complete(() => copy(viewportWarnings, 'Visible warnings copied'), close)}>Visible warnings<span>{viewportWarnings.flatMap(group => group.entries).length}</span></button>
@@ -484,6 +494,16 @@ export function LogViewer({ focusIncident, project, logs, filter, setFilter, sea
         <button role="menuitem" disabled={actionBusy || !filtered.length} onClick={() => void complete(copyPrompt, close)}>Copy as AI Debug Prompt<span>best effort masking</span></button>
       </>}</FloatingMenu>
       <FloatingMenu label="More" icon={<ChevronDown size={15} />} triggerClassName="button button-quiet" align="end" autoClose={false}>{close => <>
+        <details className="console-more-options"><summary>Display and stream options</summary><div className="console-options">
+        <label>Font size <span>{fontSize}px</span><input aria-label="Log font size" type="range" min="10" max="22" step="1" value={fontSize} onChange={event => setFontSize(Number(event.target.value))} /></label>
+        <label className="console-check"><input type="checkbox" checked={wrap} onChange={event => setWrap(event.target.checked)} />Wrap lines</label>
+        <label className="console-check"><input type="checkbox" checked={showTime} onChange={event => setShowTime(event.target.checked)} />Show timestamps</label>
+        <label className="console-check"><input type="checkbox" checked={showService} onChange={event => setShowService(event.target.checked)} />Show service labels</label>
+        <button onClick={() => { resetFilters(); close(); }}>Clear filters</button>
+        <label>Stream<select value={streamFilter} onChange={event => { setAutoScroll(false); setActiveIssue(null); setStreamFilter(event.target.value); }}><option value="all">All streams</option><option value="stdout">stdout</option><option value="stderr">stderr</option><option value="system">system</option></select></label>
+        <label>Slow request (ms)<input aria-label="Slow request threshold in milliseconds" type="number" min="0" max="600000" step="100" value={slowMs} onChange={event => setSlowMs(Math.min(600000, Math.max(0, Number(event.target.value) || 0)))} /></label>
+      </div></details>
+        <details className="console-more-options"><summary>History and sharing limits</summary><p>History remains bounded to 10,000 lines / 8 MiB per service, 20,000 / 16 MiB per project, and 40,000 / 32 MiB per session. Counts are output lines, not process crashes. Copy and export retain buffered order with best-effort masking; review before sharing.</p></details>
         {[50, 100, 500].map(count => <button key={count} role="menuitem" disabled={actionBusy || !serviceEntries.length} onClick={() => void complete(() => onCopy(formatEntries(serviceEntries.slice(-count)), `Last ${Math.min(count, serviceEntries.length)} lines copied`), close)}>Copy last {count} lines<span>selected service / stream</span></button>)}
         <button role="menuitem" disabled={actionBusy || !filteredEntries.length} onClick={() => { close(); const text = formatGroups(filtered); setConfirmation({ title: 'Export filtered logs?', description: `Export ${filteredEntries.length} matching lines from ${project.name}. Logs may contain sensitive information despite best-effort masking. Review before sharing. A native Save dialog will choose the local file.`, confirmText: 'Choose file…', action: () => { void complete(() => onExport(text)); } }); }}><Download size={14} />Export filtered logs…</button>
         <button role="menuitem" onClick={() => { resetFilters(); close(); }}>Clear view / filters<span>keeps log history</span></button>
@@ -494,9 +514,9 @@ export function LogViewer({ focusIncident, project, logs, filter, setFilter, sea
     <div className="log-category-filters" role="group" aria-label="Filter by log category">{([['all', 'All', categoryStats.entries], ['error', 'Errors', categoryStats.counts.error], ['warning', 'Warnings', categoryStats.counts.warning], ['success', 'Success', categoryStats.counts.success], ['info', 'Info', categoryStats.counts.info], ['http', 'HTTP requests', categoryStats.requests]] as const).map(([id, label, count]) => <button key={id} className={`category-chip${categoryFilter === id ? ' is-active' : ''} ${id !== 'all' && id !== 'http' ? `chip-${id}` : ''}`} aria-pressed={categoryFilter === id} onClick={() => { setAutoScroll(false); setActiveIssue(null); setCategoryFilter(id); }}>{label}<span>{count.toLocaleString()}</span></button>)}</div>
     <div className="log-navigation"><div className="issue-navigation" role="group" aria-label="Navigate matching issues">{(['error', 'warning'] as const).map(category => <span key={category}><span>{category === 'error' ? 'Errors' : 'Warnings'}</span><button aria-label={`Previous ${category}`} title={`Previous ${category}`} disabled={!(category === 'error' ? visibleErrors : visibleWarnings).length} onClick={() => navigateIssue(category, -1)}>↑</button><button aria-label={`Next ${category}`} title={`Next ${category}`} disabled={!(category === 'error' ? visibleErrors : visibleWarnings).length} onClick={() => navigateIssue(category, 1)}>↓</button></span>)}</div></div>
     </div>
-    <div ref={consoleRef} className="log-viewport-wrap"><LogViewport groups={filtered} scope={JSON.stringify([project.id, filter, streamFilter, deferredSearch, categoryFilter])} follow={autoScroll} onPause={() => setAutoScroll(false)} fontSize={fontSize} wrap={wrap} layoutKey={`${showTime}:${showService}`} target={activeIssue} targetRequest={issueRequest + (focusIncident?.request || 0)} renderRow={renderGroup} onVisible={setVisibleGroups} empty={<div className="log-empty"><Terminal size={22} /><strong>{logs.length ? 'No matching output' : 'No output to show'}</strong><span>{logs.length ? 'Adjust the service, stream, severity, or search filters.' : 'Start a service to see its output here.'}</span></div>} />{!autoScroll && filtered.length > 0 && <button className="jump-latest" onClick={() => { setActiveIssue(null); setAutoScroll(true); }}><ArrowRight size={14} />Jump to latest</button>}</div>
-    <div className="log-footer"><span><span className="live-indicator" /> {filteredEntries.length.toLocaleString()} matching entries · {stats.requests.toLocaleString()} HTTP requests</span><span aria-live="polite">{actionMessage || 'Logs stay in this session'}</span></div>
-    <p className="log-retention-note">Recent history: {MAX_SERVICE_LOGS.toLocaleString()} per service · {MAX_PROJECT_LOGS.toLocaleString()} per project · {MAX_SESSION_LOGS.toLocaleString()} per session. Text memory budgets: 8 MiB/service · 16 MiB/project · 32 MiB/session (conservative estimate). Older output expires when either limit is reached. Counts describe output lines, not service failures. Repeats show first/latest samples; copy and export retain all buffered lines with best-effort masking.</p>
+    <div ref={consoleRef} className="log-viewport-wrap"><LogViewport groups={filtered} scope={JSON.stringify([project.id, filter, streamFilter, deferredSearch, categoryFilter])} follow={autoScroll} onPause={() => setAutoScroll(false)} fontSize={fontSize} wrap={wrap} layoutKey={`${showTime}:${showService}`} target={activeIssue} targetRequest={issueRequest + (focusIncident?.request || 0)} renderRow={renderGroup} onVisible={setVisibleGroups} onLatestChange={setAtLatest} empty={<div className="log-empty"><Terminal size={22} /><strong>{logs.length ? 'No matching output' : 'No output to show'}</strong><span>{logs.length ? 'Adjust the service, stream, severity, or search filters.' : 'Start a service to see its output here.'}</span></div>} />{!atLatest && filtered.length > 0 && <button className="jump-latest" onClick={() => { setActiveIssue(null); setAutoScroll(true); }}><ArrowRight size={14} />Jump to latest</button>}</div>
+    <div className="log-footer"><span>{filteredEntries.length.toLocaleString()} matching entries · {stats.requests.toLocaleString()} HTTP requests</span><span aria-live="polite">{actionMessage || 'Logs stay in this session'}</span></div>
+
   </Card>{confirmation && <ConfirmDialog {...confirmation} onCancel={() => setConfirmation(undefined)} onConfirm={() => { const action = confirmation.action; setConfirmation(undefined); action(); }} />}</div>;
 }
 

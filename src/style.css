@@ -387,3 +387,13 @@ button:focus-visible,summary:focus-visible,select:focus-visible,.log-viewport:fo
 
 /* The service shortcut is available before the API workspace is loaded. */
 .service-api-shortcut{display:flex;justify-content:flex-end;margin-top:-8px;margin-bottom:4px}.service-api-shortcut .button{font-size:11px}
+
+/* Keep project switching and Settings outside the scrolling navigation. */
+.sidebar-navigation { flex:1; min-height:0; overflow-y:auto; scrollbar-width:thin; }
+.sidebar-nav-group { margin-bottom:16px; }
+.sidebar-project-access { flex:none; padding-block:12px; }
+.sidebar-project-access .sidebar-project-name { white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.sidebar-project-chevron { flex:none; margin-left:auto; }
+.sidebar>.brand,.sidebar>.sidebar-toggle,.sidebar>.sidebar-bottom { flex:none; }
+.sidebar.is-collapsed .sidebar-project-chevron { display:none; }
+@media(max-width:820px) { .sidebar-project-chevron { display:none; } .sidebar:not(.is-collapsed) .sidebar-project-chevron { display:initial; } }

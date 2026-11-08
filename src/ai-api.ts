@@ -40,6 +40,7 @@ export interface ChatMessagePayload {
 }
 
 export interface StartChatRequest {
+  context_budget: number;
   request_id: string;
   provider: string;
   model: string;
@@ -58,6 +59,19 @@ export interface ChatStreamChunk {
   error?: string | null;
   activity?: string | null;
   references?: { path: string; line?: number | null }[] | null;
+}
+
+export type PreparedContent = { content: string; lines: number[] };
+// Bounded session-only cache: unchanged history/attachments need not cross IPC again.
+const preparedCache = new Map<string, Promise<PreparedContent>>();
+export function prepareAiContent(content: string): Promise<PreparedContent> {
+  const cached = preparedCache.get(content); if (cached) return cached;
+  if (new TextEncoder().encode(content).length > 1024 * 1024) return Promise.reject(new Error('Content exceeds 1 MiB.'));
+  const result = invoke<PreparedContent>('ai_prepare_content', { content });
+  if (preparedCache.size >= 16) preparedCache.delete(preparedCache.keys().next().value!);
+  preparedCache.set(content, result);
+  void result.then(prepared => { if (prepared.content !== content) preparedCache.delete(content); }, () => { preparedCache.delete(content); });
+  return result;
 }
 
 export const aiApi = {

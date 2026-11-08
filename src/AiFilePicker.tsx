@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import type { FileEntry, CopyExport } from './editor-api';
-import { safeAiContext, formatAttachments, attachmentDuplicate, type AiAttachment } from './ai-context';
+import { AI_ATTACHMENT_LIMIT, readContextBudget, safeAiContext, formatAttachments, attachmentDuplicate, type AiAttachment } from './ai-context';
 export default function AiFilePicker({ projectId, projectRoot, attachments, onChange }: { projectId: string; projectRoot: string; attachments: AiAttachment[]; onChange: (items: AiAttachment[]) => void }) {
   const alive = useRef(true);
   const latest = useRef(attachments); latest.current = attachments;
@@ -39,10 +39,11 @@ export default function AiFilePicker({ projectId, projectRoot, attachments, onCh
   const add = async () => { setBusy(true); setError(''); try {
     const next = [...attachments];
     for (const path of selected) {
-      const result = await invoke<CopyExport>('editor_export', { projectId, expectedRoot: projectRoot, path, mode: 'file' });
-      const content = safeAiContext(result.text);
-      if (result.warnings.length || !result.files || !content.trim()) throw new Error('A selected file is excluded or empty.');
-      const candidate = { projectId, kind: 'file' as const, label: path, sourcePath: path, content };
+      const result = await invoke<CopyExport>('editor_export', { projectId, expectedRoot: projectRoot, path, mode: 'attachment' }).catch(cause => { throw new Error(`${path}: ${String(cause)} Select a smaller range in the editor or choose another file (secure file export cap: 256 KiB).`); });
+      let content: string;
+      try { content = safeAiContext(result.text, Math.min(readContextBudget(), AI_ATTACHMENT_LIMIT), true); } catch (cause) { throw new Error(`${path}: ${String(cause)} Select a smaller range or change the budget; individual cap 256 KiB.`); }
+      if (!result.files || !content.trim()) throw new Error('A selected file is excluded or empty.');
+      const candidate = { projectId, kind: 'file' as const, label: path, sourcePath: path, content, sanitization: result.warnings.join(" ") };
       if (!attachmentDuplicate(next, candidate)) next.push({ ...candidate, id: crypto.randomUUID() });
     }
     if (!alive.current) return;

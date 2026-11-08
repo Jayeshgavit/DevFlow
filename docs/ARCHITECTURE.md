@@ -1,32 +1,21 @@
 # DevFlow architecture and codebase reference
 
-## B2 — Port Manager
+Reviewed against the current local source, including uncommitted changes, on 2026-10-28. Paths are repository-relative. This is an implementation reference, not runtime certification. This documentation update does not establish build, desktop, provider, or Windows acceptance-test success.
 
-`src/PortManager.tsx` and `src/port-manager.css` provide the lazy `ports` navigation view, explicit inspect/refresh, project configuration context, derived counts, address-family/search/ownership filters, expandable process evidence, copy controls and the shared accessible confirmation dialog. No background scan, timer or project script parsing is added. Project changes reclassify the same local snapshot and dismiss pending confirmations.
-
-`src-tauri/src/port_manager.rs` exposes typed `inspect_ports` and `stop_port_service` IPC. A blocking worker reads native `GetExtendedTcpTable` owner-PID **listener-only** tables for IPv4/IPv6, capped at three allocation attempts, 8 MiB and 16,384 rows per family. Per-PID process inspection uses query-only handles, image paths, creation times, liveness and membership of existing DevFlow Job Objects. A five-second cooperative budget bounds process-detail work (native calls already in progress cannot be cancelled). An atomic guard prevents concurrent scans; the UI discards results after unmount. Family failures are retained and never interpreted as availability. TCP tables and process details are separate point-in-time observations, not an atomic OS snapshot.
-
-Only explicit `Service.port` and `Service.host` metadata drive diagnosis. Exact or IPv4 wildcard overlaps with a verified external owner are occupancy conflicts; unknown hosts, unavailable identity/membership and IPv6 wildcard dual-stack ambiguity remain potential conflicts. Duplicate port numbers alone are not conflicts. Unoccupied configured ports are described as no overlapping TCP listener observed, with a bind-time race caveat. No UDP or firewall reachability claims are made.
-
-WindowsJob now supplies native membership queries and a monotonic per-run token. Port Manager stops only verified managed services: `stop_owned_service_checked` validates the run token under the existing registry lock before using the unchanged Job Object stop/reap path. Ordinary stop controls call the same path without a token and retain their behavior. Confirmation discloses whole-service/child-process impact. No unmanaged termination is exposed because user ownership plus development-process authorization cannot be established by the current contracts. No shell runner, escalation, dependencies or service controller is added; existing windows-sys native feature flags are enabled.
-
-Native listener behavior, PID/access races, confirmation/stop behavior, clipboard, responsive layout and both themes still require manual runtime verification. No app launch or real termination test is implied by static checks.
-
-Verified against current local source files, including uncommitted local edits, on 2026-10-27. All paths are repository-relative. This document serves as the permanent, accurate reference for DevFlow architecture, wiring, and module responsibilities. No builds, tests, Git history, or remote sources were used for this update.
-
----
+Read `AGENTS.md` for shared development rules and `CLAUDE.md` for the Claude entry point. Planning documents describe intent; the current source and command registry establish implementation status.
 
 ## 1. Tech stack
 
 | Layer | Actual dependencies / implementation |
 | --- | --- |
 | **Desktop framework** | Tauri 2 (`@tauri-apps/api` ^2.0.0, `@tauri-apps/plugin-dialog` ^2.0.0, `tauri` 2, `tauri-plugin-dialog` 2, `tauri-plugin-notification` 2.7) |
-| **Frontend UI** | React 18.3.1, TypeScript 5.6.0 (strict), Vite 6.0.0, Lucide React ^0.468.0, standard CSS modules/stylesheets |
+| **Frontend UI** | React 18.3.1, TypeScript 5.6.0 (strict), Vite 6.0.0, Lucide React ^0.468.0, plain CSS stylesheets |
 | **Quick Editor** | CodeMirror 6 (`@codemirror/view`, `@codemirror/state`, `@codemirror/commands`, `@codemirror/search`, `@codemirror/language`, `@lezer/highlight`), lazy syntax modes (`lang-javascript`, `lang-python`, `lang-json`, `lang-html`, `lang-css`, `lang-markdown`), Markdown preview (`react-markdown` ^10.1.0, `remark-gfm` ^4.0.1) |
 | **Typography** | Local `@fontsource/inter`, `@fontsource/space-grotesk`, `@fontsource/jetbrains-mono` |
-| **Backend core** | Rust 2021 edition, `tokio` 1 (features: `process`, `io-util`, `sync`, `time`, `net`), `serde` 1 + `serde_json` 1, `ignore` 0.4 (directory walking & export filters) |
+| **Backend core** | Rust 2021 edition, `tokio` 1 (features: `process`, `io-util`, `sync`, `time`, `net`, `macros`), `serde` 1 + `serde_json` 1, `ignore` 0.4 (directory walking & export filters) |
+| **HTTP and streams** | Native `reqwest` 0.13 with JSON, streaming and native TLS; `futures-util` 0.3. Provider HTTP stays in Rust. |
 | **Windows native** | `windows-sys` 0.61.2 (Win32 APIs: Job Objects, processes, threads, Toolhelp, memory, performance, filesystem, COM, shell, messaging), `windows` 0.62.2 (`Win32_Graphics_Dxgi`) |
-| **Persistence** | Local JSON configuration (`projects.json`) and snapshot records (`file-snapshots-v1`); WebView `localStorage` for UI preferences. No hosted backend, cloud account, or remote telemetry. |
+| **Persistence** | Local JSON configuration (`projects.json`) and snapshot records (`file-snapshots-v1`); WebView `localStorage` for UI preferences. No hosted DevFlow backend or remote telemetry. Explicit AI requests contact external providers; API Tester contacts loopback HTTP endpoints. |
 
 ---
 
@@ -55,7 +44,7 @@ Verified against current local source files, including uncommitted local edits, 
 
 - **Entry point**: `index.html` loads `src/main.tsx`.
 - **Rust initialization**: `src-tauri/src/main.rs` invokes `devflow_lib::run()` in `src-tauri/src/lib.rs`, which builds Tauri, registers plugins, initializes state managers, sets window close handlers, and registers all Tauri commands.
-- **Routing & Views**: No external router library. Navigation uses a typed `View` state union (`overview | projects | logs | api | editor | system | maintenance | settings`). Secondary windows (`quick-editor`, `logs-*`) load `index.html` with query parameters (`?window=quick-editor`, `?window=logs&project=...`) and mount specialized views (`FloatingEditor`, `FloatingLogs`).
+- **Routing & Views**: No external router library. Navigation uses a typed `View` state union (`overview | projects | ports | environment | logs | api | editor | system | maintenance | settings`). Secondary windows (`quick-editor`, `logs-*`) load `index.html` with query parameters (`?window=quick-editor`, `?window=logs&project=...`) and mount specialized views (`FloatingEditor`, `FloatingLogs`).
 - **Data flow**: Main window is the primary subscriber to native log streams and exit events. Secondary windows subscribe to projected data via window bridges.
 
 ---
@@ -103,7 +92,7 @@ Add Service reuses the native dialog directory picker and `suggest_service` IPC.
 | File path | Responsibility & key symbols | Connected modules | Where changes start |
 | --- | --- | --- | --- |
 | `src-tauri/src/service_output.rs` | Output collector: `collect`. Reads asynchronous stdout/stderr pipes, chunks lines (up to 16 KiB chunks, 128 lines / 64 KiB batches, 50 ms flush), bounds memory. | `src-tauri/src/lib.rs` | Pipe chunking, output batching intervals, backpressure |
-| `src/log-utils.ts` | Pure log engine: `appendLogs`, `logBytes` (caps: 10K lines/8MB per service, 20K lines/16MB per project, 40K lines/32MB per session), `createSourceDeduper`, `createAnsiLogNormalizer`, `groupLogs`, `redactForSharing`, `parseErrorLocation`, `buildAiDebugPrompt`. | `src/main.tsx`, `src/SharedLogs.tsx`, `src/components.tsx` | Retention caps, ANSI parsing, secret redaction patterns, stack trace parsing |
+| `src/log-utils.ts` | Pure log engine: `appendLogs`, `logBytes` (caps: 10K lines/8 MiB per service, 20K lines/16 MiB per project, 40K lines/32 MiB per session), `createSourceDeduper`, `createAnsiLogNormalizer`, `groupLogs`, `redactForSharing`, `parseErrorLocation`, `buildAiDebugPrompt`. | `src/main.tsx`, `src/SharedLogs.tsx`, `src/components.tsx` | Retention caps, ANSI parsing, secret redaction patterns, stack trace parsing |
 | `src/log-actions.ts` | Frontend log action helpers: `writeLogClipboard` (`logs_copy`), `exportLogText` (`logs_export`), `verifyErrorLocation`, `openErrorLocation`. | `src-tauri/src/log_actions.rs`, `src/components.tsx` | Clipboard and file export caller logic |
 | `src-tauri/src/log_actions.rs` | Native log actions: `logs_copy` (Win32 clipboard), `logs_export` (Tauri file save dialog), `logs_verify_location`, `logs_open_location`, `logs_take_location`. | `src/log-actions.ts`, `src-tauri/src/logs_window.rs` | Native clipboard integration, export dialog, file/line jump routing |
 | `src/components.tsx` (`LogViewer`) | `LogViewer`: Virtualized log console, level filters, service filters, text search, follow mode, ANSI rendering, error-location links. | `src/log-viewport.tsx`, `src/log-console.css` | Log console UI, search highlighting, filter tabs |
@@ -112,6 +101,16 @@ Add Service reuses the native dialog directory picker and `suggest_service` IPC.
 | `src/log-sharing.ts` | `createLogFrames`, `applyLogFrame`: Computes incremental delta frames and resets for multi-window log mirroring. | `src/SharedLogs.tsx` | Frame delta computation, sequence reconciliation |
 
 ### 3.6 Quick Editor, file explorer, and AI Assistant
+
+Project-wide text search lives in `src/ProjectSearch.tsx` and `src-tauri/src/quick_editor/search.rs`, with typed `editor_search` / `editor_cancel_search` wrappers in `editor-api.ts`. The Explorer panel debounces input by 300 ms, rejects stale responses, groups results by file and renders 100 matches per page. `shortcuts.ts` routes Ctrl+Shift+F through the active editor; result navigation reuses the existing location flow and adds optional Unicode-aware column positioning in `EditorSurface.tsx`. Existing drafts are retained; search results always describe disk text.
+
+The same panel offers project replacement through a read-only `editor_preview_replace` command. It prepares fresh original/proposed contents for at most 100 matching files, 1,000 replacements and 16 MiB combined text, preserving BOM and line endings. Literal replacement treats dollar signs literally; regex replacement supports numbered/named captures and `$$` with bounded incremental expansion. Read-only, mixed-ending and oversized output files fail preparation. Limited/cancelled search results and unsaved target drafts block replacement. Review shows named files, counts and explicitly bounded before/after excerpts; changing query, replacement, project or dirty targets invalidates it. Confirmation saves the reviewed files through existing `editor_save`, never a second write path. `QuickEditor.tsx` holds the existing work lock, verifies writer ownership and all original disk contents before starting, then saves sequentially with per-file optimistic checks, eligible pre-save snapshots and atomic file replacement. Clean open tabs receive the saved content; drafts remain protected. A multi-file batch is not atomic: failures stop later saves and report confirmed successful paths plus the error; earlier saves remain. No AI tool can call this operation.
+
+Native scans use the existing saved-root resolver, ancestor locks and 2 MiB UTF-8 reader on blocking workers. The existing `ignore` walker respects ignore rules without following links; fixed dependency/build folders are skipped. The direct `regex` dependency supplies literal escaping, Unicode whole-word/case options and bounded regex compilation; optional comma-separated include/exclude globs use `ignore` matchers. Each window owns one cancellation registration; replacement, explicit Stop, component cleanup or window destruction cancels its matching scan. Work is bounded to 1,000 matches, 20,000 yielded entries, approximately 10 seconds, depth 64 and a 64 MiB read budget (at most one 2 MiB file beyond the budget); result flags identify partial scans and counts report unreadable/unsupported skipped files. Filesystem calls are synchronous and cancellation observes checkpoints rather than interrupting an OS call. Saved-root configuration is rechecked before returning results. Search is local and read-only, independent of AI research authorization/export policies; results never enter provider context automatically. Native/WebView interaction and large-project latency require manual verification.
+External file synchronization uses `quick_editor/watch.rs` and `use-external-file-sync.ts`. The existing `EditorWindow` holds one cancellable, lease-checked Windows registration. It watches only the immediate parent directories of up to 20 open tabs, nonrecursively, through Win32 change notification handles (no new dependency, polling, subtree scans, or service integration). A single waiting worker coalesces directory signals over 180 ms, with a 750 ms maximum batch interval, then emits registered relative paths and the frontend generation to the owner. Generated/dependency directories are excluded. Handoff cancels the previous registration; the receiver registers after acquiring its writer lease and rechecks all open files to cover the transition gap. Cleanup includes registration-generation checks so stale cleanup cannot cancel a newer subscription.
+
+All content is reread through `editor_read`, including bounded retries for temporary replacement/access failures; notifications never authorize paths. Exact content equality avoids unnecessary state/undo changes. Clean tabs update their document and normalized baseline together; dirty tabs retain both their draft and old disk baseline and carry a transferable conflict/missing indicator. Async results are checked against project/root, subscription generation, notification revision, current draft state, operation locks and the native lease. Save-time concurrency/snapshot guards remain authoritative. Explicit reload rereads after confirmation and refuses a changed draft or a newer disk version. Active CodeMirror text replacement uses an annotated transaction with clamped selection and retained scroll, suppresses draft callbacks, and resets incompatible undo history without remounting; inactive tabs receive the same cached state update. The existing local editor preferences store persists Auto (default), Notify, and Manual modes across windows; Manual releases the watcher. Only affected expanded Explorer parent listings refresh in the background, without a loading-state collapse. Other directories retain explicit Refresh. Missing parent folders or notification-handle failures require reopening a tab or changing the synchronization preference to retry monitoring; drafts and manual guarded reads remain available.
+
 Brain Queue (A7) is a collapsible Quick Editor Explorer panel in `src/BrainQueue.tsx` with task/note/prompt types, progress, filters, and expandable multiline text. It stores bounded items in WebView `localStorage` under a versioned key per stable project ID (100 items, 4,000 characters each). The component remounts on project selection, validates saved records including older items without a type, and does not read or write project files, editor drafts, or AI services. Its styles are in `brain-queue.css`.
 Paste as New File (A6) is an explicit clipboard → review → create → open workflow. `src/paste-new-file.ts` reuses the A5 fenced-content parser with separate file/path extraction (including Windows separators and Copy for AI metadata). `src/PasteAsNewFile.tsx` and `src/paste-new-file.css` provide multi-block selection, editable destinations, explicit folder/path conflict resolution, syntax previews, missing-directory consent, and per-file results. Folder/root context menus and the Edit menu in `QuickEditor.tsx` launch it. The typed `editor_create_files` IPC in `quick_editor/paste_new.rs` handles both read-only preview and confirmed batch creation under the existing writer lease and filesystem mutex. It reuses saved-root verification, Windows filename/exclusion checks, directory handle guards and reparse rejection; validates the complete batch before writes, then rechecks guarded ancestors and uses `create_new` for each file. Input is bounded to 20 supported text files / 256 KiB total. Partial failures retain and report new files and directories without rollback deletion. Successful creation refreshes expanded Explorer folders and opens tabs while preserving drafts. No save/snapshot engine, service execution, background clipboard monitoring or dependency is added. Native clipboard, ACL/race failures, floating-window ownership, focus and responsive rendering require manual verification.
 
@@ -122,11 +121,11 @@ Smart Replace (A5) is a human-initiated clipboard-to-draft workflow. `src/smart-
 | `src/QuickEditor.tsx` | Quick Editor shell: File tree explorer, multi-tab management, dirty state tracking, line ending preservation, save/reload, file creation/rename, error location jump, AI assistant panel toggle and horizontal resize split. | `src/EditorSurface.tsx`, `src/EditorContextMenu.tsx`, `src/EditorHistory.tsx`, `src/AiAssistantPanel.tsx`, `src/editor-api.ts` | Editor layout, tab management, file tree interactions, AI panel toggle |
 | `src/AiAssistantPanel.tsx` | AI Assistant panel: Provider and credential controls, streaming chat, and explicit context attachment previews with per-snapshot review before sending. | `src/QuickEditor.tsx`, `src/ai-api.ts`, `src/ai-context.ts`, `src/ai-assistant-panel.css` | AI chat and reviewed attachment controls |
 | AI conversation modes | Composer selection persists locally: Chat answers normally with optional reviewed attachments, Research alone requests a project-bound read-only token, and Web uses model knowledge with no project history or browsing. Rust owns the mode-specific system instruction and rejects tokens outside Research. Unsafe/failed local messages remain visible but are omitted from later requests; diagnostic path replacements require a reviewed composer edit. | `src/AiAssistantPanel.tsx`, `src/ai-context.ts`, `src-tauri/src/ai_chat.rs` | Prompt boundaries and outgoing request safety |
-| `src/ai-context.ts` | AI context safety helpers: bounded attachment formatting, approximate character sizing, redaction, and renderer-side checks for secret values and absolute paths. | `src/AiAssistantPanel.tsx`, `src/QuickEditor.tsx`, `src/log-utils.ts` | Attachment formatting and content checks |
+| `src/ai-context.ts` | AI context safety helpers: bounded attachment formatting, UTF-8 byte accounting, selectable context budgets, attachment formatting, and renderer-side validation of native-prepared snapshots. | `src/AiAssistantPanel.tsx`, `src/QuickEditor.tsx`, `src/log-utils.ts` | Attachment formatting and content checks |
 | `src/ai-api.ts` | Typed IPC wrapper for AI: `aiApi` (`setApiKey`, `deleteApiKey`, `getCredentialStatus`, `testConnection`, `listModels`, `startChat`, `stopChat`, `subscribeChatStream`). Filters streaming events by `requestId` for multi-window isolation. | `src/AiAssistantPanel.tsx`, `src-tauri/src/lib.rs` | AI frontend IPC contracts, stream subscription |
 | `src/ai-assistant-panel.css` | AI Assistant styles: Theme-tokenized panel layout, message bubbles, fenced code blocks with copy buttons, streaming cursor, API key modal dialog, reviewed attachment previews, composer layout, responsive clamp sizing. | `src/AiAssistantPanel.tsx` | AI Assistant side panel styling and design tokens |
-| `src-tauri/src/ai_credentials.rs` | Windows Credential Manager integration: Secure local storage (`CredWriteW`, `CredReadW`, `CredDeleteW`) for OpenRouter and NVIDIA NIM API keys. Automatic key masking (`sk-or-v1-••••1234`, `nvapi-••••1234`). Keys never touch the frontend, JS context, or error logs. | `src-tauri/src/ai_chat.rs`, `src-tauri/src/lib.rs` | Windows credential persistence and secret redaction |
-| `src-tauri/src/ai_chat.rs` | AI provider HTTP client and streaming completion engine: Connection testing, official model discovery with compatibility fallback, SSE stream processing, cancellation tokens (`oneshot`), bounded conversation/attachment limits, final secret/path request scan, and window-targeted event emission (`ai-chat-delta`). | `src-tauri/src/ai_credentials.rs`, `src-tauri/src/lib.rs` | Provider HTTP clients, SSE parsing, cancellation, final request safety checks |
+| `src-tauri/src/ai_credentials.rs` | Windows Credential Manager integration: Secure local storage (`CredWriteW`, `CredReadW`, `CredDeleteW`) for OpenRouter and NVIDIA NIM API keys. Automatic key masking (`sk-or-v1-••••1234`, `nvapi-••••1234`). New keys pass through the credential entry form and typed IPC once; saved keys are not returned in plaintext. Only masked status is returned to the UI. | `src-tauri/src/ai_chat.rs`, `src-tauri/src/lib.rs` | Windows credential persistence and secret redaction |
+| `src-tauri/src/ai_chat.rs` | AI provider HTTP client and streaming completion engine: Connection testing, live model discovery without hardcoded catalog fallback, SSE stream processing, cancellation tokens (`oneshot`), bounded conversation/attachment limits, final secret/path request scan, and window-targeted event emission (`ai-chat-delta`). | `src-tauri/src/ai_credentials.rs`, `src-tauri/src/lib.rs` | Provider HTTP clients, SSE parsing, cancellation, final request safety checks |
 | `src/EditorSurface.tsx` | CodeMirror 6 integration: Lazy language extension loading, theme styling, scroll syncing, text selection API, Markdown live preview toggle. | `src/QuickEditor.tsx`, CodeMirror packages | Code editor keymaps, extensions, code highlighting |
 | `src/editor-api.ts` | Typed IPC wrapper: `editorApi` (`list`, `read`, `save`, `mutate`, `export`, AI file validation, `reveal`, `lease`, `history`, `snapshot`, `restore`). Text normalization and `aiContext` builder. | `src-tauri/src/quick_editor.rs`, `src-tauri/src/quick_editor/actions.rs` | Editor IPC contracts, AI context snippet generation |
 | `src/editor-session.ts` | Pure session helpers: `openTab`, `closeTab`, `updateDraft`, `renameTab`, `dirtyTabs`. | `src/QuickEditor.tsx`, `tests/editor-session.test.mjs` | Tab state transitions, dirty tracking logic |
@@ -146,12 +145,12 @@ Smart Replace (A5) is a human-initiated clipboard-to-draft workflow. `src/smart-
 | File path | Responsibility & key symbols | Connected modules | Where changes start |
 | --- | --- | --- | --- |
 | `src/EditorHistory.tsx` | History comparison UI: `EditorHistory`. Visual diff comparison between current file text and previous snapshots, restore confirmation. | `src/QuickEditor.tsx`, `src/editor-api.ts` | File version history list, diff presentation |
-| `src-tauri/src/quick_editor/snapshots.rs` | Snapshot engine: `before_save`, `editor_history`, `editor_snapshot`, `editor_restore`. Automatic snapshot before save. Enforces 20 versions/file, 1000 total records, 64 MiB total storage cap. Sensitive content and excluded files are skipped. | `src-tauri/src/quick_editor.rs` | Snapshot pruning rules, sensitive content filters, restore validation |
+| `src-tauri/src/quick_editor/snapshots.rs` | Snapshot engine: `before_save`, `editor_history`, `editor_snapshot`, `editor_restore`. Automatic snapshot before save. Enforces 20 versions/file, 999 retained versions overall (1,000-entry scan guard), 64 MiB total storage cap. Sensitive content and excluded files are skipped. | `src-tauri/src/quick_editor.rs` | Snapshot pruning rules, sensitive content filters, restore validation |
 
 ### 3.9 Settings and local persistence
 | File path | Responsibility & key symbols | Connected modules | Where changes start |
 | --- | --- | --- | --- |
-| `src/main.tsx` (Settings view) | Appearance preferences (theme: light/dark/system, compact layout switch), keyboard shortcuts reference, local design information. | `src/components.tsx`, `localStorage` | Adding application settings or appearance toggles |
+| `src/main.tsx` (Settings view) | Appearance preferences (theme: light/dark/system, compact layout switch), editable keyboard bindings, editor preferences, chat storage, notifications, and local User Guide. | `src/components.tsx`, `localStorage` | Adding application settings or appearance toggles |
 | `src/project-store.ts` | Local persistence orchestrator for workspace projects. Manages `projects.json` load/save cycles and in-memory caches. | `src-tauri/src/lib.rs` | Project metadata persistence logic |
 | `src-tauri/src/project_storage.rs` | Low-level storage: atomic file save with `.tmp` staging and safe rename. | `src-tauri/src/lib.rs` | Storage path management and atomic persistence |
 
@@ -173,6 +172,20 @@ Smart Replace (A5) is a human-initiated clipboard-to-draft workflow. `src/smart-
 | `src/system-api.ts` | System IPC contract: `systemApi` (`snapshot`, `endTask`, `scan`, `clean`, `scanCleanup`, `cleanSelectedCleanup`, `cancel`, `flushDns`, `storage`). | `src-tauri/src/system_center.rs` | System Center frontend API methods |
 | `src-tauri/src/system_center.rs` | Windows system implementation: CPU ticks, process snapshot via Toolhelp32, memory via `GlobalMemoryStatusEx`, GPU via PDH counters / DXGI, disk metrics via `GetDiskFreeSpaceExW`. Protected process kill prevention. Safe temp scan/cleaning. | `src-tauri/src/lib.rs` | Windows telemetry collection, safe file cleaner paths |
 | `src-tauri/src/system_center_unavailable.rs` | Non-Windows stub reporting features as unavailable. | `src-tauri/src/lib.rs` | Cross-platform fallback messages |
+
+### Workspace tools, help, and shortcut ownership
+
+| Files | Responsibility / integration |
+| --- | --- |
+| `src/Overview.tsx`, `src/overview.css` | Existing project/service evidence and notification activity; no automatic inspections or synthetic metrics. |
+| `src/PortManager.tsx`, `src/port-manager.css`, `src-tauri/src/port_manager.rs` | Explicit bounded native TCP listener inspection; checked managed-service stop by run token. |
+| `src/DeveloperEnvironment.tsx`, `src/developer-environment.css`, `src-tauri/src/developer_environment.rs` | Fixed executable/version checks and bounded saved-root manifest inspection; no installer. |
+| `src/ApiTester.tsx`, `src/ApiExplorer.tsx`, `src/ApiTextEditor.tsx` | Project-scoped requests, source/OpenAPI discovery, editable endpoint selection, response display. |
+| `src/api-tester-api.ts`, `src/api-tester-state.ts`, `src/api-discovery.ts`, `src/api-tester-format.worker.ts`, `src-tauri/src/api_tester.rs` | Typed transport, local request state, bounded explicit discovery, formatting worker, loopback transport and safe persistence. |
+| `src/shortcuts.ts`, `src/KeyboardSettings.tsx` | Scoped shortcut registry, validated editable bindings, localStorage synchronization; dialogs and embedded controls keep priority. |
+| `src/UserGuide.tsx`, `src/guide-content.ts`, `src/user-guide.css` | Local searchable help dialog and contextual links. DOM events `devflow-guide-open` and `devflow-guide-navigate`; no external docs fetch. |
+| `src/ChatStorageSettings.tsx`, `src/chat-history.ts`, `src-tauri/src/chat_history.rs` | Revision/lease-protected project conversations, export, explicit storage selection/migration. |
+| `src-tauri/src/ai_provider.rs`, `src-tauri/src/ai_model_check.rs`, `src-tauri/src/quick_editor/research.rs` | Fixed provider protocol/catalogs, explicit synthetic model probes, and authorized read-only project tools. |
 
 ### 3.12 Tests and configuration
 | File path | Responsibility | Where changes start |
@@ -212,7 +225,7 @@ All Tauri commands are registered in `devflow_lib::run()` inside `src-tauri/src/
 | | `stopping_services`| *(none)* | `Vec<String>` | Returns keys currently in termination phase. |
 | | `check_service_health` | `service: Service` | `HealthSnapshot` | Loopback HTTP probe (`127.0.0.1`/`::1`) with status validation. |
 | | `managed_service_count` | *(window: WebviewWindow)* | `usize` | Counts active managed processes before closing. |
-| | `shutdown_app` | `confirmed: bool` | `()` | Gracefully stops all owned services and exits application. |
+| | `shutdown_app` | `confirmed: bool` | `()` | Stops owned service trees and exits; application-level graceful shutdown is not guaranteed. |
 | **Log actions** | `logs_copy` | `text: String` | `()` | Copies text to Windows native clipboard. |
 | | `logs_export` | `project_id: String, text: String` | `bool` | Opens native Save As dialog and writes log output. |
 | | `logs_verify_location` | `project_id: String, expected_root: String, path: String, line: usize` | `bool` | Verifies existence of file/line reference in project. |
@@ -255,11 +268,26 @@ All Tauri commands are registered in `devflow_lib::run()` inside `src-tauri/src/
 | | `ai_delete_api_key` | `provider: String` | `()` | Deletes provider API key from Windows Credential Manager. |
 | | `ai_get_credential_status` | `provider: String` | `CredentialStatus` | Returns whether key exists and masked preview (`sk-...1234`). |
 | | `ai_test_connection` | `provider: String` | `TestConnectionResult` | Tests connection with official provider API. |
-| | `ai_list_models` | `provider: String` | `Vec<AiModelInfo>` | Retrieves models from provider API with offline fallback. |
+| | `ai_list_models` | `provider: String` | `Vec<AiModelInfo>` | Retrieves the live provider catalog; failures do not substitute models. |
 | | `ai_start_chat` | `request: StartChatRequest` | `()` | Starts background streaming chat completion task. |
 | | `ai_stop_chat` | `request_id: String` | `bool` | Cancels active streaming chat via cancellation token. |
 | **External** | `open_directory` | `path: String, mode: String` | `()` | Opens directory in Explorer or preferred terminal. |
 | | `open_in_ai_cli` | `root: String` | `()` | Launches user-configured AI CLI in project root. |
+
+### Additional registered commands
+
+These complete the registry above. Exact request/response fields live in the named Rust module and its TypeScript wrapper; injected Tauri window/state arguments are not frontend payload fields.
+
+| Domain / native module | Commands | Contract boundary |
+| --- | --- | --- |
+| Port Manager (`port_manager.rs`) | `inspect_ports`, `stop_port_service` | Main-window inspection and verified managed-run stop. |
+| Environment (`developer_environment.rs`) | `check_tool`, `check_project_requirements` | Main window; fixed tool IDs or saved project/root. |
+| API Tester (`api_tester.rs`) | `api_tester_source`, `api_tester_prepare`, `api_tester_send`, `api_tester_cancel`, `api_tester_load`, `api_tester_save` | Main window, project binding, request reservation/cancellation, revisioned local storage. |
+| Chat storage (`chat_history.rs`) | `chat_storage_location`, `chat_storage_pick`, `chat_storage_apply`, `chat_history_export`, `chat_history_load`, `chat_history_save` | Saved project identity; writes check writer lease, location and revision. |
+| Reviewed file creation (`quick_editor/paste_new.rs`) | `editor_create_files` | Preview or confirmed bounded batch under writer lease; no overwrite. |
+| AI validation (`ai_chat.rs`) | `ai_prepare_content` | Bounded sanitization proposal for review, without changing files. |
+| AI probes (`ai_model_check.rs`) | `ai_check_model` | Explicit provider/model/mode check; may consume provider credits. |
+| Research (`quick_editor/research.rs`) | `ai_research_context`, `ai_clear_research_context` | Window/project/root/lease-bound token. Model tools are internal Rust dispatch, not unrestricted IPC. |
 
 ### Tauri event contracts
 
@@ -279,6 +307,8 @@ All Tauri commands are registered in `devflow_lib::run()` inside `src-tauri/src/
 | `logs-window-closed` | Rust backend → Main window | `windowLabel: string` | Informs main that a floating logs window was closed. |
 | `ai-chat-delta` | Rust backend → Target window | `ChatStreamChunk` | Incremental streaming chat token delta, completion signal, or cancellation/error. |
 
+Frontend bridges additionally use `logs-subscribe`, `logs-unsubscribe`, `logs-frame`, and `logs-clear` (`SharedLogs.tsx` / `log-sharing.ts`), plus `project-services-subscribe`, `project-services-state`, `project-services-action`, and `project-services-result` (`ProjectServiceControls.tsx`). Preserve target validation, frame tokens/revisions, and main-window ownership.
+
 ### Managed backend state & Window labels
 
 - **`AppState`**: Holds in-memory map of `ProcessEntry` (`Starting`, `Running`, `Stopping`), `exiting` atomic flag, and `projects_loaded` status.
@@ -289,6 +319,8 @@ All Tauri commands are registered in `devflow_lib::run()` inside `src-tauri/src/
 - **`DesktopAlerts`**: Throttles native Windows notifications (10-second interval).
 - **`SystemCenter`**: Caches system performance queries and maintenance cancellation tokens.
 - **`AiChatState`**: Tracks active streaming chat requests and cancellation senders (`tokio::sync::oneshot`).
+- **`ResearchState`**: Window-bound project research authorization and invalidation.
+- **`ApiTester`**: Single native active request reservation and shutdown cancellation.
 - **Window labels**:
   - `main`: Primary application shell.
   - `quick-editor`: Standalone floating editor window (`?window=quick-editor`).
@@ -301,9 +333,12 @@ All Tauri commands are registered in `devflow_lib::run()` inside `src-tauri/src/
 | Data category | Storage location & lifetime | Format / Limits | Persistence mechanism |
 | --- | --- | --- | --- |
 | **Project configurations** | `%APPDATA%\com.devflow.desktop\projects.json` | JSON format. Validated schema: unique IDs, absolute roots, sanitized program names. | Persistent. Saved atomically via `save_file` (`projects.<id>.tmp` -> `projects.json`). Leaves `projects.previous.<id>.json` on replace. |
-| **File snapshots** | `%LOCALAPPDATA%\com.devflow.desktop\file-snapshots-v1\` | JSON records: `{ id, timestamp, project, file, path, content }`. | Persistent across sessions. Bounded: 20 versions/file, 1000 total records, 64 MiB total store. Oldest pruned automatically. |
+| **File snapshots** | `%LOCALAPPDATA%\com.devflow.desktop\file-snapshots-v1\` | JSON records: `{ id, timestamp, project, file, path, content }`. | Persistent across sessions. Bounded: 20 versions/file, 999 retained versions overall (1,000-entry scan guard), 64 MiB total store. Oldest pruned automatically. |
 | **Active project files** | User workspace directories on disk | Raw source files (UTF-8). Max size 2 MiB in Quick Editor. | Direct filesystem writes with temporary staging (`.devflow-*.tmp`) and `.bak` fallback. |
 | **UI preferences** | Chromium WebView `localStorage` | Key-value pairs: `devflow-theme`, `devflow-compact`, `devflow-recent`, `devflow-sidebar-collapsed`, `devflow-editor-width`, etc. | Managed by WebView2 runtime on local machine. |
+| **AI conversations** | `app_data_dir()/ai-chats-v1/project-<hex>.json`, or explicitly selected custom directory | 100 chats / 8 MiB per project; revisions and writer leases; no automatic pruning. `ai-chat-storage.json` stores the location. | Redacted persisted history/drafts; reviewed attachments stay memory-only. |
+| **AI credentials** | Windows Credential Manager | Provider-scoped key records; masked status returned to UI. | No plaintext key in JSON/localStorage. |
+| **API Tester** | `app_data_dir()/api-tester-v1/project-<hex>.json` | Revisioned bounded JSON; credentials/session-only fields excluded. | Native validated persistence; see B1 policy below. |
 | **Brain Queue** | Chromium WebView `localStorage` (`devflow-brain-queue-v1:<project ID>`) | Per-project JSON array; at most 100 items and 4,000 characters per item. | Saved on user changes; malformed records ignored. |
 | **Incident history** | Chromium WebView `localStorage` (`devflow-notifications-v1`) | JSON format. Capped at 300 records and 30-day age limit. | Persistent. Managed by `NotificationStore`. |
 | **Service output logs** | In-memory only (`src/main.tsx` React state) | Bounded log buffers: 10,000 lines / 8 MB per service; 20,000 lines / 16 MB per project; 40,000 lines / 32 MB per session. | Ephemeral. Cleared when application closes. Exportable to disk via user action. |
@@ -314,11 +349,11 @@ All Tauri commands are registered in `devflow_lib::run()` inside `src-tauri/src/
 
 ## 6. Safety rules
 
-1. **Managed process containment**: Every service is launched in a dedicated Windows Job Object configured with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`. Process termination terminates the entire process tree, preventing orphaned descendant processes. Never kill processes by PID discovery, executable name, or port binding.
+1. **Managed process containment**: Every service is launched in a dedicated Windows Job Object configured with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`. Process termination terminates the entire process tree, preventing orphaned descendant processes. Service Stop must use owned Job Objects, never PID/name/port discovery. System Center has a separate guarded End Task workflow for eligible unmanaged processes; Port Manager stops verified managed services only.
 2. **Safe file access**: Quick Editor operations strictly require path validation inside saved project roots. Rejects directory traversal (`..`), path separators in components, colon streams (`:`), NUL bytes, symlinks, NTFS junctions, and reparse points. Ancestor directories are held with non-delete-sharing handles during writes to prevent junction swapping.
 3. **Draft preservation & writer leases**: Editor file writes require a valid writer revision lease. Floating and docked windows transfer ownership through an explicit handoff protocol. Window close events check for dirty drafts and require confirmation before discarding.
-4. **Secret handling & redaction**: Never save credentials or secrets in project configurations. Export routines and AI prompts run through `redactForSharing()` (masking API keys, tokens, auth headers, passwords, connection strings). Raw logs remain local and are never transmitted automatically.
-5. **Bounded resource allocation**: Output collection is rate-limited and chunked (16 KiB chunks, 50 ms flush). Service logs have strict line and byte caps. Snapshot storage is capped at 64 MiB. Large files (>2 MiB) are blocked from Quick Editor.
+4. **Secret handling & redaction**: Never save credentials or secrets in project configurations. Logs display and sharing use best-effort `redactForSharing()` masking. AI uses native outgoing checks, reviewed sanitization proposals, and guarded source exports; these are distinct policies, not a universal guarantee that secrets are removed. Raw logs remain local and are never transmitted automatically.
+5. **Bounded resource allocation**: Output collection is batched and chunked (16 KiB chunks, 50 ms flush). Service logs have strict line and byte caps. Snapshot storage is capped at 64 MiB. Large files (>2 MiB) are blocked from Quick Editor.
 6. **No arbitrary shell execution**: Service execution requires explicit program and argument lists reviewed by the user. Constrained batch scripts run via dedicated wrappers; arbitrary unrestricted shell commands or silent installs are prohibited.
 
 ---
@@ -328,7 +363,7 @@ All Tauri commands are registered in `devflow_lib::run()` inside `src-tauri/src/
 | Feature area | Implementation status | Evidence in codebase |
 | --- | --- | --- |
 | **Project import & detection** | **Implemented** | Heuristic detection for Node.js (npm/yarn/pnpm), Rust (Cargo), and Python (FastAPI/Flask/Django/uvicorn). Manual configuration overrides supported. |
-| **Service lifecycle** | **Implemented** | Start, stop, restart, bulk actions, and graceful shutdown backed by Windows Job Objects. Port conflict detection and reservation tracking. |
+| **Service lifecycle** | **Implemented** | Start, stop, restart, bulk actions, and shutdown cleanup backed by Windows Job Objects. Port conflict detection and reservation tracking. |
 | **Loopback health checks** | **Implemented** | Configurable HTTP health checks restricted to loopback (`127.0.0.1`/`::1`) with status code ranges. |
 | **Health dashboard** | **Present, unintegrated** | `src/service-health-dashboard.tsx` is implemented but not currently routed or mounted in `src/main.tsx`. |
 | **Log viewing & filtering** | **Implemented** | Virtualized log viewer (`LogViewport`), ANSI color rendering, search, level filters, service filters, HTTP request parsing. |
@@ -338,8 +373,9 @@ All Tauri commands are registered in `devflow_lib::run()` inside `src-tauri/src/
 | **File snapshot history** | **Implemented** | Pre-save snapshot engine with diff comparison and conflict-guarded restore (`file-snapshots-v1`). |
 | **System Center** | **Implemented (Windows)** | System telemetry (CPU, RAM, GPU, Disks), process inspector with safe End Task, temp file cleaner, DNS flush. Non-Windows platforms use fallback stub. |
 | **Incident notifications** | **Implemented** | In-app notification center with deduplication, severity levels, and throttled native Windows desktop toasts. |
-| **A3 AI Chat / Assistant** | **Phase 1, Phase 2 & Phase 3 Implemented** | OpenRouter and NVIDIA NIM, Windows Credential Manager, model discovery, SSE streaming/cancellation, and explicit reviewed attachments for active files/drafts, selected code, checked/recent-error Logs, and bounded project metadata/tree context. Read-only; AI has no tools or file/service operations. |
-| **Runtime certification** | **Verified** | Verified with TypeScript checks, Vite build, Cargo check, and Node.js integration tests on Windows. |
+| **A3 AI Chat / Assistant** | **Chat, attachments, and Research implemented** | OpenRouter and NVIDIA NIM, Windows Credential Manager, model discovery, SSE streaming/cancellation, and explicit reviewed attachments for active files/drafts, selected code, checked/recent-error Logs, and bounded project metadata/tree context. Research adds five bounded read-only project tools. AI cannot write files, run commands, or control services. |
+| **Workspace tools** | **Implemented in source** | Overview, API Tester/discovery, Port Manager, Developer Environment, editable shortcuts and local help. Native runtime behavior requires verification. |
+| **Verification status** | **Source reviewed for this update** | No build, test, app launch, provider request, or real termination was run for this documentation update. Windows acceptance remains a separate check. |
 
 ---
 
@@ -354,21 +390,21 @@ All Tauri commands are registered in `devflow_lib::run()` inside `src-tauri/src/
 - Quick prompt starter chips: Explain code, Debug error, Review selected code.
 
 ### Phase 2: Secure AI Chat Integration (Implemented)
-- **Rust provider client**: Native HTTP requests originating in Rust (`reqwest` with native TLS). Zero key exposure to the frontend, browser JS, or debug logs.
+- **Rust provider client**: Native HTTP requests originating in Rust (`reqwest` with native TLS). Stored keys are read only by Rust; new keys enter through the UI credential form. Do not log keys or return stored plaintext.
 - **Windows Credential Manager**: Local key persistence using `CredWriteW`, `CredReadW`, `CredDeleteW`. Keys are masked (`sk-...1234`) and never sent back to the frontend in plaintext.
 - **Provider support**: Official endpoints for OpenRouter and NVIDIA NIM.
-- **Model discovery**: Dynamic retrieval from official provider endpoints with curated fallback lists.
+- **Model discovery**: Live retrieval from fixed official provider endpoints. Catalog failures remain visible; no hardcoded model substitution.
 - **Streaming chat completion**: SSE stream parsing with real-time token emission via window-targeted `ai-chat-delta` events.
 - **Cancellation**: Tokio oneshot cancellation tokens for immediate Stop Generating.
 - **Multi-window safety**: Every request carries a unique `requestId` to prevent cross-window conversation pollution.
-- **Safety guarantees**: Strictly read-only AI. No tool execution, no file modification, no terminal access. Bounded history (<= 20 messages, <= 48k chars).
+- **AI boundary**: No file modification, terminal access, or service control. Research alone enables bounded read-only tools. Outgoing message text is capped at 1 MiB / 20 messages; attachment and serialized-payload budgets are separate.
 
 ### Phase 3: Context Attachments (Implemented)
 - Attachments are explicit snapshots. Active files and selected code use the safe editor export checks; unsaved content is labeled and never saved as a side effect.
 - Selected Logs come from checked, current-project rows or bounded recent error context. Existing filters and copy operations remain available.
 - Project context uses the bounded safe tree export and configured framework/role metadata without transmitting source contents.
 - Attachments are removable and previewable. New snapshots require a review confirmation before a request and are removed after sending, starting a new chat, or switching projects.
-- Redaction, renderer checks, and a final Rust request scan reject credentials, secret-like values, and absolute paths. Context is limited to 12,000 UTF-8 bytes; displayed sizing is approximate characters, not a token count.
+- Redaction, renderer checks, and a final Rust request scan reject credentials, secret-like values, and absolute paths. Each attachment including metadata is capped at 256 KiB. Combined budgets are 16/64/256/512 KiB (64 KiB default); displayed UTF-8 bytes are not token counts. See AI attachment budgets below.
 
 
 ## A3 Phase 4: on-demand read-only project research
@@ -383,7 +419,7 @@ Directory pages inspect at most 100 entries, return basic type/size metadata, an
 
 Limits: 16 calls, 12 KiB per serialized result, 64 KiB unique tool-result context and 256 KiB cumulative retransmitted tool-result context per turn; 256 KiB per file; 200 lines per read (120 default); 40 search rows; 10,000 scanned entries / 8 MiB source reads / 3 seconds per search page; 180 seconds per turn and 90 seconds per provider request. Search DFS permits up to 256 simultaneous directory levels; folder expansion is independent of recursive search depth. Directory offsets cap at 1,000,000 and reflect live filesystem enumeration, so external folder changes can shift pages. Limits, next page/line cursors, omitted files and truncated snippets are explicit. There is no background project scan/index.
 
-The existing panel adds a read-only Research toggle, compact activity, and source links. Rust emits verified path/line references separately from model text; only returned references become editor buttons. Links reuse the existing Quick Editor location/line-jump flow. Tests use disposable fixtures and synthetic provider deltas, without provider API calls. Native provider compatibility, floating/docked transitions and Windows junction scenarios require desktop/manual verification; see the final implementation report for checks actually run.
+The existing panel adds a read-only Research toggle, compact activity, and source links. Rust emits verified path/line references separately from model text; only returned references become editor buttons. Links reuse the existing Quick Editor location/line-jump flow. Tests use disposable fixtures and synthetic provider deltas, without provider API calls. Native provider compatibility, floating/docked transitions and Windows junction scenarios require desktop/manual verification; source descriptions here do not establish runtime success.
 
 
 ### AI panel model defaults and controls
@@ -415,7 +451,7 @@ The panel provides a Free models only filter (blocking a paid/unknown selection 
 Official references reviewed: OpenRouter [limits](https://openrouter.ai/docs/api_reference/limits), [errors](https://openrouter.ai/docs/api_reference/errors-and-debugging), [account-filtered models](https://openrouter.ai/docs/api/api-reference/models/list-models-filtered-by-user-provider-preferences-privacy-settings-and-guardrails), [routing parameters](https://openrouter.ai/docs/guides/routing/provider-selection), [reasoning continuation](https://openrouter.ai/docs/guides/best-practices/reasoning-tokens); NVIDIA [hosted chat APIs](https://docs.api.nvidia.com/nim/reference/llm-apis), [GPT-OSS endpoint](https://docs.api.nvidia.com/nim/reference/openai-gpt-oss-20b-infer), and live public [model discovery](https://integrate.api.nvidia.com/v1/models). Documentation pages and discovery can differ as models are renamed/retired; runtime discovery takes precedence over documentation examples.
 
 ### Quick Editor refinement (source review only)
-`EditorSurface` exposes a compartment-backed word-wrap toggle without recreating the editor. `AiFilePicker` browses folders on demand through existing `editor_list` and reads explicitly selected files through guarded `editor_export`; combined attachment limits and review-before-send remain enforced. `AiCode` reuses installed JavaScript/TypeScript, Python and JSON parsers for bounded response highlighting; other languages stay plain text. NVIDIA preferences are retained locally; the requested Bolt default remains unverified and requires explicit model selection. OpenRouter initial selection requires live free/tool metadata and a coding-family candidate; no paid fallback is selected. No runtime verification was performed.
+`EditorSurface` exposes a compartment-backed word-wrap toggle without recreating the editor. `AiFilePicker` browses folders on demand through existing `editor_list` and reads explicitly selected files through guarded `editor_export`; combined attachment limits and review-before-send remain enforced. `AiCode` reuses installed JavaScript/TypeScript, Python and JSON parsers for bounded response highlighting; other languages stay plain text. NVIDIA preferences are retained locally; automatic selection resolves a concrete model from the live catalog, with an optional explicit override. OpenRouter initial selection requires live free/tool metadata and a coding-family candidate; no paid fallback is selected. No runtime verification was performed.
 
 
 ### Persistent editor workspace and AI history (2026-10-28; source review only)
@@ -478,6 +514,18 @@ Bearer tokens, Basic usernames/passwords, sensitive-name rows, secret-marked row
 
 Source review covered imports, camelCase IPC shapes/registration, project bindings, cancellation/timeout cleanup, schema/loading/revision/atomic-write paths, session-only credential projection, response limits/formatting, UI handlers, shortcut scope, and theme tokens. Compilation, Windows networking/TLS/cancellation, create-send-inspect-save-reopen across restarts, project switching during requests, storage failures/conflicts, clipboard/search/large responses, and light/dark/narrow-window rendering still require verification. No compilation or runtime success is asserted.
 
+## B2 — Port Manager
+
+`src/PortManager.tsx` and `src/port-manager.css` provide the lazy `ports` navigation view, explicit inspect/refresh, project configuration context, derived counts, address-family/search/ownership filters, expandable process evidence, copy controls and the shared accessible confirmation dialog. No background scan, timer or project script parsing is added. Project changes reclassify the same local snapshot and dismiss pending confirmations.
+
+`src-tauri/src/port_manager.rs` exposes typed `inspect_ports` and `stop_port_service` IPC. A blocking worker reads native `GetExtendedTcpTable` owner-PID **listener-only** tables for IPv4/IPv6, capped at three allocation attempts, 8 MiB and 16,384 rows per family. Per-PID process inspection uses query-only handles, image paths, creation times, liveness and membership of existing DevFlow Job Objects. A five-second cooperative budget bounds process-detail work (native calls already in progress cannot be cancelled). An atomic guard prevents concurrent scans; the UI discards results after unmount. Family failures are retained and never interpreted as availability. TCP tables and process details are separate point-in-time observations, not an atomic OS snapshot.
+
+Only explicit `Service.port` and `Service.host` metadata drive diagnosis. Exact or IPv4 wildcard overlaps with a verified external owner are occupancy conflicts; unknown hosts, unavailable identity/membership and IPv6 wildcard dual-stack ambiguity remain potential conflicts. Duplicate port numbers alone are not conflicts. Unoccupied configured ports are described as no overlapping TCP listener observed, with a bind-time race caveat. No UDP or firewall reachability claims are made.
+
+WindowsJob now supplies native membership queries and a monotonic per-run token. Port Manager stops only verified managed services: `stop_owned_service_checked` validates the run token under the existing registry lock before using the unchanged Job Object stop/reap path. Ordinary stop controls call the same path without a token and retain their behavior. Confirmation discloses whole-service/child-process impact. No unmanaged termination is exposed because user ownership plus development-process authorization cannot be established by the current contracts. No shell runner, escalation, dependencies or service controller is added; existing windows-sys native feature flags are enabled.
+
+Native listener behavior, PID/access races, confirmation/stop behavior, clipboard, responsive layout and both themes still require manual runtime verification. No app launch or real termination test is implied by static checks.
+
 ## B3 — Developer Environment & Dependency Inspector
 
 `src/DeveloperEnvironment.tsx` is a lazy main-window view near Projects. It uses the existing saved-project selection, shared Button/Card controls, and semantic theme variables. Results live only in React memory. All checks require a button action; project-switch and unmount generations discard stale results. Refresh All uses three frontend workers; there is no polling or cross-project scan.
@@ -492,3 +540,42 @@ Source review covered imports, camelCase IPC shapes/registration, project bindin
 `ApiTester.tsx` receives the existing running registry (excluding stopping services), shows configured loopback endpoints, and rechecks saved metadata and current running/stopping registries before OpenAPI discovery. Running means managed process presence, not socket readiness. Literal FastAPI constructor evidence supplies default/custom OpenAPI paths; disabled/dynamic paths are not guessed. An explicit path override is available. Fetches reuse the existing reservation/cancellation, eight-second timeout, 1 MiB response cap and redirect-blocked loopback transport. Schema server URLs and external references are ignored. Source patterns cover literal Express app routes and same-file router mounts, Flask app decorators, narrow Node method/URL comparisons and Python BaseHTTPRequestHandler path comparisons. Dynamic routes, cross-file mounts and unsupported patterns are omitted; source routes remain unverified.
 
 `ApiExplorer.tsx` owns endpoint search, method filtering and collapsible groups. Selection prepares editable requests without sending. Parameters, schema/content type and bounded JSON examples are shown; unresolved path placeholders block sending. B1 saved requests, collections, history, session credentials, duplicate ordered query parameters and transport stay intact. Project-keyed remounts discard stale work; endpoint/status changes invalidate discovery; source cancellation is checked between reads. Response CodeMirror highlighting/search/copy gains a pointer/keyboard separator with a bounded size preference. Responsive styles reuse theme tokens. Windows rendering, actual local discovery and requests remain manual verification items.
+
+
+## Overview command center
+
+`src/Overview.tsx` and `src/overview.css` own the compact status strip, selected-workspace service panel, project-scoped tool shortcuts, project list, and bounded notification activity presentation. The project list filters locally between up to five recent selections, all running projects, and all projects with stopped-service failures; secondary project actions expand inline. App passes saved projects, existing local recent-selection ordering (no timestamps), the native managed-process registry, pending/stopping keys, service errors/exits, cached HTTP checks, and retained-log availability. Navigation selects the explicit target before changing views. Starts delegate to the existing guarded bulk runner and navigate to Projects for progress; no lifecycle implementation or IPC contract changes.
+
+Overview subscribes only to the existing bounded NotificationStore, displaying event reason metadata without raw messages. Recorded/resolved history is separate from current stopped-service failure counts; stderr volume is never a failure count. Environment inspection reports only aggregate counts and completion time to App memory after explicit tool checks; Overview never mounts or triggers inspectors. API history, chat contents, endpoint discovery, port scans, and file scans are not loaded for Overview. No automatic probes, polling, provider requests, or new persistence are added. Both themes use existing semantic tokens. Native interactions and visual rendering require manual verification.
+
+
+### AI attachment budgets
+`ai-context.ts` owns UTF-8 accounting and the saved AI context preference: Small 16 KiB, Standard 64 KiB (default), Large 256 KiB, Extended 512 KiB. The Assistant Attach row and its Settings share this preference. Each reviewed attachment (including its metadata) is capped at 256 KiB, combined payloads at the selected budget, and outgoing message text at 1 MiB / 20 messages. Typed `context_budget` is allowlisted and enforced again by Rust. Complete safe history is retained until an explicit size/count rejection; attachments are never truncated. Serialized provider payloads including system/tool data are capped at 2 MiB each. Research retains its separate existing per-tool and cumulative transmission bounds. Provider token capacity remains separate from bytes; catalog capacity is displayed and provider failures remain visible without model substitution. Existing guarded 256 KiB file exports, bounded 2 MiB editor reads, root/reparse validation and secret checks remain unchanged. Selected logs no longer silently drop entries after the first 100; the attachment budget rejects oversized selections instead.
+
+
+### Quick Editor local clipboard boundaries
+
+`QuickEditor.tsx` and `editor-api.ts` route Explorer metadata (`name`, `relative`, `full`) through saved-root native validation without reading source contents. Full-path presentation removes canonical Windows drive/UNC prefixes only for clipboard display. `tree` walks metadata only, including binary/sensitive file names, prunes dependency/build folders, and never parses `.gitignore` or scans source contents. Traversal retains entry/depth/time/output and link guards.
+
+Explicit raw file/selection/line/section copies use exact disk bytes or current CodeMirror text as appropriate, without provider-export credential checks or truncation. Explorer content uses disk; editor-originated actions retain unsaved drafts and never save them. Clearly sensitive filenames prompt about the local clipboard. Ctrl+C retains CodeMirror's standard local selection behavior. Markdown preview code-block copies remain plain local copies.
+
+Clipboard-only `copy-file`, `copy-folder`, and `copy-slice` reuse `ai_chat::prepare_content` rather than the provider reject-only validator. Sensitive paths, ignored files, unsupported/binary types and uncertain private-key/multiline credentials remain excluded/blocked for AI preparation. Folder exports read disk, include complete fenced files, a tree, and explicit omitted paths/subtrees. Traversal is bounded to 2,000 entries, 100 included files, depth 24 and five seconds; individual reads retain the 2 MiB editor ceiling. Legacy attachment, validate, research and write policies retain their separate limits and behavior.
+
+The persisted `devflow-editor-copy-budget` preference supports 16/64/128/256/512 KiB (64 KiB default). Native preparation and final frontend assembly check UTF-8 bytes including labels/fences. Oversize files are rejected or omitted whole; no excerpt is silently substituted. Users can increase the budget, narrow the folder, choose a file, or select code. This preference never changes Assistant or provider limits.
+
+`CopyReview.tsx` displays only sanitized snapshots, affected project-relative paths/source lines, included-file count, omissions and exact bytes. Approval is bound to source, project, tab, draft, selection and budget; disk exports are prepared again and compared before copying. Failed clipboard writes do not report success. Both docked and floating windows mount this same workflow. No files, watchers, processes or network requests are created by copy. Redaction is heuristic; review before sharing.
+
+### AI outgoing security and sanitization review
+
+`ai_chat.rs::outgoing_content_issue` is the native policy for user text, history, attachments and assembled provider turns (including research/tool content). `ai_prepare_content` returns a bounded in-memory sanitization proposal and changed line numbers without returning detected values in diagnostics. Exact placeholders and direct environment references are permitted; an example/test field name does not exempt its value. Bearer prose is distinguished from header literals and opaque token-shaped values. Private-key markers and ambiguous multiline credential literals remain blocked. Delimited bearer/quoted assignment values retain surrounding text; uncertain single-line spans use a whole-line mask with line numbers preserved. Detection remains heuristic.
+
+`editor_export` attachment mode retains saved-root, relative path, link/junction, ignore, type and sensitive-path guards; it checks disk even with a draft and returns only the sanitized snapshot (256 KiB cap). Existing validate/copy/research/write policies retain their fail-closed behavior. No file is modified by sanitization. `ai-context.ts` applies path/size guards to native-prepared snapshots; the panel validates them with the native policy again before request assembly. `ai-api.ts` bounds its session cache to 16 unchanged safe inputs; changed/rejected content is evicted. The panel binds message review to exact original/sanitized content and current send inputs, invalidates draft/attachment approvals on edits, excludes failed user/assistant turns and natively unsafe history, and never substitutes an original after review. Attachment previews identify sanitized source/context lines and retain removal controls. Final native request validation remains mandatory; each assembled provider turn is checked again before transmission. No AI file writes or command execution is introduced.
+
+
+## Documentation maintenance and verification
+
+`AGENTS.md` holds shared coding policy and check commands; `CLAUDE.md` points Claude to that policy. This document maps current implementation. `docs/DESIGN_SYSTEM.md` governs UI patterns; `docs/QUICK_EDITOR.md`, `docs/DOCKABLE_LOGS.md`, `docs/NOTIFICATIONS.md`, and `docs/SYSTEM_CENTER.md` provide focused background. Old roadmap/phase labels are not runtime evidence.
+
+For changes, inspect the relevant source, IPC registration, wrappers, window authorization and tests together. Update this reference when ownership, contracts or persistence change, and update `guide-content.ts` when user workflows change. There is no MCP server, automatic dependency installer or automatic venv setup in the current registered implementation.
+
+This update checks documented paths and command coverage against local files and checks Markdown diffs. It does not run builds or tests. Outstanding acceptance includes real Windows import/save/reopen, reliable contained start/stop/restart/shutdown, second-workspace reopening, floating-window/draft recovery, clipboard, provider/account behavior, and visual/keyboard checks. Native cleanup and End Task must be tested only against deliberately authorized disposable targets.

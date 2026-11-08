@@ -5,6 +5,7 @@ export default function EditorPreferences() {
   const [error, setError] = useState('');
   const update = (patch: Partial<Preferences>) => { const next = { ...value, ...patch }; try { saveEditorPreferences(next); setValue(next); setError(''); } catch { setError('Preferences could not be saved.'); } };
   return <section className="settings-card"><h2>Editor Preferences</h2>
+    <label className="setting-row">External File Changes<select value={value.externalChanges} onChange={e => update({ externalChanges: e.target.value as Preferences['externalChanges'] })}><option value="auto">Auto-reload clean files</option><option value="notify">Notify before reloading</option><option value="manual">Manual reload only</option></select></label>
     <label className="setting-row">Word wrap<select value={value.wrap} onChange={e => update({ wrap: e.target.value })}><option value="on">Always On</option><option value="off">Always Off</option><option value="remember">Remember Last Used</option></select></label>
     <label className="setting-row">Font size<input type="number" min="10" max="24" value={value.fontSize} onChange={e => update({ fontSize: Math.max(10, Math.min(24, Number(e.target.value) || 13)) })} /></label>
     <label className="setting-row">Line height<input type="number" min="1.2" max="2.4" step="0.1" value={value.lineHeight} onChange={e => update({ lineHeight: Math.max(1.2, Math.min(2.4, Number(e.target.value) || 1.6)) })} /></label>

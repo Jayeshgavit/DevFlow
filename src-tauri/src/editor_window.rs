@@ -36,7 +36,7 @@ impl Session {
     }
 }
 #[derive(Default)]
-pub struct EditorWindow(pub Mutex<Session>);
+pub struct EditorWindow(pub Mutex<Session>, pub Mutex<Option<(String, crate::quick_editor::watch::Watch)>>);
 fn caller(window: &tauri::WebviewWindow, expected: &str) -> Result<(), String> {
     if window.label() == expected { Ok(()) } else { Err("Editor window operation is not available here.".into()) }
 }
@@ -65,6 +65,7 @@ pub async fn editor_float(app: tauri::AppHandle, window: tauri::WebviewWindow, s
         let state = app.state::<EditorWindow>();
         let mut session = state.0.lock().map_err(|e| e.to_string())?;
         session.begin(snapshot)?;
+        state.1.lock().map_err(|e| e.to_string())?.take();
     }
     let result = tauri::WebviewWindowBuilder::new(&app, "quick-editor", tauri::WebviewUrl::App("index.html?window=quick-editor".into()))
         .title("Quick Editor — DevFlow").inner_size(1000.0, 740.0).min_inner_size(620.0, 480.0).resizable(true).visible(false).build();
@@ -106,6 +107,7 @@ pub fn editor_close(app: tauri::AppHandle, window: tauri::WebviewWindow) -> Resu
     }
     // Called only after the editor's unsaved-change guard approves.
     window.destroy().map_err(|e| e.to_string())?;
+    state.1.lock().map_err(|e| e.to_string())?.take();
     state.0.lock().map_err(|e| e.to_string())?.reset();
     app.emit_to("main", "editor-closed", ()).map_err(|e| e.to_string())?;
     Ok(())
@@ -119,6 +121,7 @@ pub fn editor_dock(app: tauri::AppHandle, window: tauri::WebviewWindow, snapshot
     // Notify before committing: the receiving handler reads only after this lock is released.
     app.emit_to("main", "editor-docked", ()).map_err(|e| e.to_string())?;
     session.receive(snapshot)?;
+    state.1.lock().map_err(|e| e.to_string())?.take();
     Ok(())
 }
 #[tauri::command]

@@ -1,0 +1,138 @@
+/* Existing blue, mint and amber roles sit on neutral surfaces. Blue identifies
+   the workspace; mint and amber communicate actual service and event state. */
+.command-center{--overview-blue:#294e80;--overview-blue-soft:#eaf0f9;--overview-blue-text:#294e80;display:flex;flex-direction:column;gap:32px;min-width:0;padding-bottom:24px;font-family:var(--font-ui)}
+
+[data-theme=dark] .command-center{--overview-blue:#a7c8fa;--overview-blue-soft:#202c3c;--overview-blue-text:#b9d3fa}
+
+.command-header{display:flex;align-items:center;justify-content:space-between;gap:24px}
+.command-header>div{min-width:0}
+.command-header h1{margin:0 0 8px;font:600 28px/1.2 var(--font-ui);letter-spacing:-.8px}
+.command-header p,.command-note{margin:0;font-size:12px;line-height:1.65;color:var(--text-muted);overflow-wrap:anywhere}
+
+.command-center .button{min-height:36px;font-size:12px;transform:none}
+.command-center .button-primary{background:var(--text);border-color:var(--text);color:var(--surface)}
+.command-center .button-primary:not(:disabled):hover{background:var(--text-muted);border-color:var(--text-muted);color:var(--surface)}
+.command-center .button:not(:disabled):hover{transform:none}
+.command-center .button:not(:disabled):active{transform:translateY(1px)}
+.command-center svg{stroke-width:1.75;flex-shrink:0}
+
+.command-metrics{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));border-block:1px solid var(--border-soft);padding:20px 0}
+.command-metric{display:flex;flex-direction:column;align-items:stretch;gap:8px;text-align:left;min-width:0;padding:4px 24px;color:var(--text);background:transparent;border:0;border-inline-end:1px solid var(--border-soft);transition:background 150ms ease-out}
+.command-metric:first-child{padding-left:0}
+.command-metric:last-child{border-inline-end:0}
+.command-metric:hover{background:var(--surface-soft)}
+.command-metric-label{display:flex;align-items:center;justify-content:space-between;gap:8px;font-size:12px;color:var(--text-muted)}
+.command-metric>strong{font-size:26px;line-height:1.25;font-weight:600;letter-spacing:-.7px;font-variant-numeric:tabular-nums;overflow-wrap:anywhere}
+.command-metric>small{font-size:11px;line-height:1.6;color:var(--text-muted);margin-top:auto;overflow-wrap:anywhere}
+
+.command-main{display:grid;grid-template-columns:minmax(0,1fr) 296px;gap:40px;align-items:start}
+.command-work,.command-side{display:flex;flex-direction:column;min-width:0;gap:32px}
+.command-side{padding-left:28px;border-left:1px solid var(--border-soft)}
+
+.command-center .command-panel{min-width:0;padding:24px;background:var(--surface);border:1px solid var(--border-soft);border-radius:var(--radius-lg);box-shadow:none}
+.command-center .command-focus{background:var(--overview-blue-soft);border-color:color-mix(in srgb,var(--overview-blue) 24%,var(--border-soft))}
+.command-section-heading{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:16px}
+.command-section-heading h2{font:600 15px/1.4 var(--font-ui);margin:0}
+.command-focus .command-section-heading h2{color:var(--overview-blue-text);font-size:12px;font-weight:500}
+.command-focus-state{font-size:12px;color:var(--overview-blue-text);text-align:right}
+.command-focus-name{margin:24px 0 8px;font:600 clamp(22px,2.2vw,28px)/1.25 var(--font-ui);letter-spacing:-.7px;overflow-wrap:anywhere}
+.command-focus-path{margin:0;font:11px/1.7 var(--font-mono);color:var(--text-muted);overflow-wrap:anywhere}
+.command-focus-actions{display:flex;flex-wrap:wrap;gap:8px;margin-top:24px}
+
+.command-health-services{display:flex;flex-direction:column;margin-top:24px}
+.command-service{display:flex;justify-content:space-between;align-items:start;gap:20px;padding:14px 0;border-top:1px solid color-mix(in srgb,var(--overview-blue) 18%,transparent)}
+.command-service>div{min-width:0}
+.command-service strong{display:block;font-size:13px;font-weight:600;overflow-wrap:anywhere}
+.command-service small{display:block;font-size:11px;line-height:1.65;color:var(--text-muted);margin-top:4px;overflow-wrap:anywhere}
+.command-service>span{font-size:11px;line-height:1.6;text-align:right;color:var(--text-muted);flex-shrink:0;max-width:42%}
+.command-focus-footer{display:flex;align-items:center;justify-content:space-between;gap:16px;padding-top:16px;border-top:1px solid color-mix(in srgb,var(--overview-blue) 18%,transparent)}
+.command-focus-footer>div{min-width:0}
+.command-focus-footer .command-note{font-size:11px}
+.command-focus-footer .button{flex-shrink:0}
+.command-center .command-running{color:var(--success)}
+.command-center .command-error{color:var(--danger)}
+
+.command-filters{display:flex;flex-wrap:wrap;gap:4px;border-bottom:1px solid var(--border-soft)}
+.command-filters button{border:0;border-bottom:2px solid transparent;padding:10px 12px;background:transparent;color:var(--text-muted);font-size:12px;min-height:40px}
+.command-filters button:first-child{padding-left:0;padding-right:16px}
+.command-filters button[aria-pressed=true]{color:var(--text);border-bottom-color:var(--text);font-weight:600}
+.command-filters button:hover{color:var(--text);background:var(--surface-soft)}
+.command-project-caption{margin-top:12px;font-size:11px}
+
+.command-projects{margin-top:8px}
+.command-project{padding:20px 0;border-bottom:1px solid var(--border-soft)}
+.command-project-heading{display:flex;align-items:center;gap:12px;min-width:0}
+.command-project-heading>div{min-width:0;flex:1}
+.command-project-icon{display:grid;place-items:center;width:32px;height:32px;flex-shrink:0;color:var(--text-muted)}
+.command-project.is-selected .command-project-icon{color:var(--overview-blue)}
+.command-project h3{font-size:13px;line-height:1.5;font-weight:600;margin:0;overflow-wrap:anywhere}
+.command-path{display:block;font:11px/1.7 var(--font-mono);color:var(--text-muted);overflow-wrap:anywhere}
+.command-state{font-size:11px;line-height:1.6;text-align:right;max-width:120px;color:var(--text-muted)}
+.command-project-meta{display:flex;flex-wrap:wrap;gap:4px 16px;margin:8px 0 12px 44px;color:var(--text-muted);font-size:11px}
+.command-project-actions{display:flex;align-items:start;gap:8px;flex-wrap:wrap;padding-left:44px}
+.command-project-tools{min-width:0;flex:1}
+.command-project-tools summary{width:fit-content;cursor:pointer;min-height:36px;padding:9px 12px;color:var(--text-muted);font-size:12px;border-radius:var(--radius-md)}
+.command-project-tools summary:hover{color:var(--text);background:var(--surface-soft)}
+.command-project-tools[open] summary{color:var(--text)}
+.command-project-tools>div{display:flex;flex-wrap:wrap;gap:4px;margin-top:4px}
+.command-project-tools .command-note{font-size:11px;margin:8px 12px 0}
+
+.command-shortcuts{display:flex;flex-direction:column;margin-top:16px}
+.command-shortcuts>button{display:flex;align-items:center;gap:12px;width:100%;min-height:64px;padding:12px 0;text-align:left;color:var(--text-muted);background:transparent;border:0;border-bottom:1px solid var(--border-soft);transition:background 150ms ease-out}
+.command-shortcuts>button>span{min-width:0;flex:1}
+.command-shortcuts>button>svg:last-child{margin-left:auto}
+.command-shortcuts>button:hover,.command-events>button:hover{background:var(--surface-soft)}
+.command-shortcuts strong,.command-events strong{display:block;font-size:12px;line-height:1.5;font-weight:600;color:var(--text);overflow-wrap:anywhere}
+.command-shortcuts small,.command-events small{display:block;font-size:11px;line-height:1.6;color:var(--text-muted);overflow-wrap:anywhere}
+.command-note strong{color:var(--text);font-weight:500}
+.command-section-meta{font-size:11px;color:var(--text-muted)}
+
+.command-events{margin-top:16px}
+.command-events>button{display:flex;align-items:start;gap:12px;min-width:0;width:100%;padding:16px 0;text-align:left;color:var(--text-muted);border:0;border-top:1px solid var(--border-soft);background:transparent}
+.command-events>button>span:nth-child(2){min-width:0;flex:1}
+.command-event-icon{color:var(--log-warning);padding-top:2px}
+.command-events time{display:block;color:var(--text-muted);font-size:11px;line-height:1.6;margin-top:6px;font-variant-numeric:tabular-nums}
+.command-empty{padding:24px 0;color:var(--text-muted);font-size:12px;line-height:1.7}
+.command-empty h3{margin:0 0 8px;color:var(--text);font:600 22px/1.3 var(--font-ui)}
+.command-empty p{margin:0 0 16px}
+.command-center .empty-state{padding:32px 16px}
+.command-center button:focus-visible,.command-center summary:focus-visible{outline:3px solid var(--focus);outline-offset:3px}
+.command-center button:active:not(:disabled){background-color:var(--surface-soft)}
+.command-center .button-primary:active:not(:disabled){background-color:var(--text-muted)}
+
+@media(max-width:1240px){.command-main{grid-template-columns:minmax(0,1fr) 252px;gap:24px}
+.command-side{padding-left:20px}
+.command-metric{padding-inline:16px}
+.command-focus-footer{align-items:start;flex-direction:column}
+}
+
+@media(max-width:1020px){.command-main{grid-template-columns:minmax(0,1fr)}
+.command-side{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:28px;padding:24px 0 0;border-left:0;border-top:1px solid var(--border-soft)}
+.command-focus-footer{flex-direction:row}
+.command-metrics{grid-template-columns:repeat(2,minmax(0,1fr));row-gap:24px}
+.command-metric:nth-child(2){border-inline-end:0}
+.command-metric:nth-child(3){padding-left:0}
+}
+
+@media(max-width:620px){.command-center{gap:24px}
+.command-header{align-items:start;flex-direction:column;gap:16px}
+.command-header h1{font-size:24px}
+.command-side{display:flex}
+.command-center .command-panel{padding:20px}
+.command-service,.command-focus-footer{align-items:start;flex-direction:column;gap:8px}
+.command-service>span{max-width:none;text-align:left}
+.command-focus-footer{gap:16px}
+.command-project-heading{flex-wrap:wrap}
+.command-state{margin-left:44px;max-width:none;text-align:left}
+.command-project-actions{padding-left:0}
+.command-center .button,.command-filters button,.command-project-tools summary{min-height:44px}
+.command-project-tools summary{padding-top:13px}
+.command-metric>strong{font-size:22px}
+}
+
+@media(max-width:380px){.command-metrics{grid-template-columns:minmax(0,1fr);gap:20px}
+.command-metric{padding:0;border:0}
+}
+
+@media(prefers-reduced-motion:reduce){.command-center *,.command-center *::before,.command-center *::after{transition:none!important;transform:none!important}
+}

@@ -1,3 +1,4 @@
+import { HelpLink } from './UserGuide';
 import { invoke } from '@tauri-apps/api/core';
 import { loadHistory, saveHistory, type History } from './chat-history';
 import { redactForSharing } from './log-utils';
@@ -26,11 +27,14 @@ import {
   Plus,
   X,
   FolderTree,
+  History as HistoryIcon,
+  MoreHorizontal,
+  Paperclip,
 } from 'lucide-react';
 import Markdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import {
-  aiApi,
+  aiApi, prepareAiContent,
   type AiModelInfo,
   type AiProvider,
   type CredentialStatus,
@@ -40,7 +44,7 @@ import {
 import './ai-assistant-panel.css';
 import AiFilePicker from './AiFilePicker';
 import AiCode, { AiCopyButton, AiCodeBlock } from './AiCode';
-import { contextByteSize, attachmentsForProject, formatAttachments, safeAiContext, sanitizeDiagnosticPaths, type AiAttachment } from './ai-context';
+import { AI_CONTEXT_BUDGETS, AI_REQUEST_LIMIT, readContextBudget, saveContextBudget, contextByteSize, attachmentsForProject, formatAttachments, eligibleAiHistory, sanitizationApproved, sanitizeDiagnosticPaths, type AiAttachment } from './ai-context';
 
 type AssistantMode = 'chat' | 'research' | 'web';
 
@@ -180,6 +184,24 @@ const ConversationMessage = memo(function ConversationMessage({ msg, isGeneratin
   );
 });
 
+function SanitizedMessageReview({ content, lines, error, onSend, onCancel }: {
+  content: string; lines: number[]; error: string | null; onSend: () => void; onCancel: () => void;
+}) {
+  const dialog = useRef<HTMLDialogElement>(null);
+  useLayoutEffect(() => {
+    const element = dialog.current;
+    element?.showModal();
+    return () => { element?.close(); };
+  }, []);
+  return <dialog ref={dialog} className="qe-ai-sanitize-dialog" aria-labelledby="qe-ai-review-title" onCancel={event => { event.preventDefault(); onCancel(); }}>
+    <h3 id="qe-ai-review-title">Review sanitized message</h3>
+    <p>Potential credentials or absolute paths were replaced with safe references. {lines.length ? `Sanitized lines: ${lines.join(', ')}.` : ''} The original has not been sent.</p>
+    <pre tabIndex={0} aria-label="Exact sanitized message">{content}</pre>
+    {error && <p role="alert">{error}</p>}
+    <div><button type="button" className="qe-ai-btn-quiet" autoFocus onClick={onCancel}>Cancel</button><button type="button" className="qe-ai-send-btn" onClick={onSend}>Send sanitized version</button></div>
+  </dialog>;
+}
+
 export default function AiAssistantPanel({
   projectId,
   projectRoot,
@@ -210,7 +232,8 @@ export default function AiAssistantPanel({
     catch { return 'chat'; }
   });
   const researchEnabled = mode === 'research';
-  const [sanitizedPreview, setSanitizedPreview] = useState('');
+  const [sanitizedPreview, setSanitizedPreview] = useState<{ source: string; content: string; lines: number[]; key: string }>();
+  const preparing = useRef(false);
   useEffect(() => { try { localStorage.setItem('devflow-ai-mode', mode); } catch { /* Session mode remains usable. */ } }, [mode]);
   const [researchToken, setResearchToken] = useState<string>();
   const [researchError, setResearchError] = useState('');
@@ -284,6 +307,10 @@ export default function AiAssistantPanel({
   // Consent follows exact snapshot contents, even if a restored attachment
   // retains its ID. Changing a label/project/content requires fresh review.
   const attachmentKey = attachments.length ? JSON.stringify(attachments.map(({ id, projectId, kind, label, content, unsaved }) => ({ id, projectId, kind, label, content, unsaved }))) : '';
+  const sendInputKey = JSON.stringify([projectId, draft, attachmentKey, provider, model, mode, messages]);
+  const sendInputRef = useRef(sendInputKey); sendInputRef.current = sendInputKey;
+  useEffect(() => () => { sendInputRef.current = ''; }, []);
+  useEffect(() => { setSanitizedPreview(undefined); setReviewedAttachmentKey(''); }, [draft]);
   const previousAttachmentKey = useRef(attachmentKey);
   useEffect(() => { if (previousAttachmentKey.current !== attachmentKey) setReviewedAttachmentKey(''); previousAttachmentKey.current = attachmentKey; }, [attachmentKey, projectId]);
   useEffect(() => { onMessagesChange?.(messages); }, [messages]);
@@ -314,6 +341,8 @@ export default function AiAssistantPanel({
   const setNimModel = (value: string) => { setNimModelState(value); try { localStorage.setItem('devflow-nim-model', value); } catch { /* Session selection remains usable. */ } };
   const [catalogReady, setCatalogReady] = useState(false);
   const [freeOnly, setFreeOnly] = useState(false);
+  const [contextBudget, setContextBudget] = useState(readContextBudget);
+  const budgetControl = <label className="qe-ai-budget-control" title="Attachment context budget in bytes, not tokens"><span className="qe-ai-sr-only">Context budget</span><select aria-label="AI attachment context budget" value={contextBudget} disabled={isStreaming || historyBusy} onChange={event => { const value = Number(event.target.value); setContextBudget(value); saveContextBudget(value); }}>{AI_CONTEXT_BUDGETS.map(bytes => <option key={bytes} value={bytes}>{bytes / 1024} KiB</option>)}</select></label>;
   const [responseTokens, setResponseTokens] = useState(1024);
   const automaticNim = models.find(item => item.is_default);
   const nimAutomaticModel = automaticNim?.id || '';
@@ -392,6 +421,12 @@ export default function AiAssistantPanel({
   const openReference = useCallback((path: string, line: number) => referenceHandler.current(path, line), []);
   const attachMenuRef = useRef<HTMLDetailsElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  useLayoutEffect(() => {
+    const input = textareaRef.current;
+    if (!input) return;
+    input.style.height = 'auto';
+    input.style.height = `${input.scrollHeight}px`;
+  }, [draft]);
   const messageAreaRef = useRef<HTMLDivElement>(null);
   const messageContentRef = useRef<HTMLDivElement>(null);
   const followLatest = useRef(true);
@@ -640,18 +675,45 @@ export default function AiAssistantPanel({
     activeRequestRef.current = null;
   };
 
-  const handleSend = async () => {
+  const handleSend = async (approval?: typeof sanitizedPreview) => {
     if (!historyReady) { setHistoryError('Load local history before starting a response.'); return; }
     if (historyAction.current || isStreaming || checkRunRef.current) return;
-    const trimmed = draft.trim();
+    let trimmed = draft.trim();
     if (!trimmed) return;
     if (attachmentsForProject(attachments, projectId).length !== attachments.length) {
       setModelsError('Attachments belong to another project. Remove them before sending.');
       return;
     }
-    const sanitized = sanitizeDiagnosticPaths(trimmed);
-    if (sanitized !== trimmed) { setSanitizedPreview(sanitized); return; }
-    setSanitizedPreview('');
+    if (preparing.current) return;
+    const inputKey = sendInputKey;
+    let historySlice: ChatMessage[] = [];
+    preparing.current = true;
+    try {
+      const proposed = await prepareAiContent(sanitizeDiagnosticPaths(trimmed));
+      if (sendInputRef.current !== inputKey) return;
+      if (proposed.content !== trimmed) {
+        if (!sanitizationApproved(approval, inputKey, trimmed, proposed.content)) {
+          setSanitizedPreview({ source: trimmed, content: proposed.content, lines: proposed.lines, key: inputKey }); return;
+        }
+        trimmed = proposed.content;
+      }
+      // One native policy for current text, attachments, and old history.
+      for (const attachment of attachments) {
+        const checked = await prepareAiContent(attachment.content);
+        if (checked.content !== attachment.content) throw new Error(`${attachment.label}: review a fresh sanitized snapshot. Remove and reattach this attachment.`);
+      }
+      const candidates = mode === 'web' ? [] : eligibleAiHistory(messages);
+      if (candidates.length > 19) throw new Error('Conversation exceeds 20 outgoing messages. Start a new conversation.');
+      const checkedHistory = await Promise.all(candidates.map(async message => {
+        try { const checked = await prepareAiContent(message.content); return checked.content === message.content ? message : undefined; }
+        catch { return undefined; }
+      }));
+      historySlice = checkedHistory.filter((message): message is ChatMessage => !!message);
+    } catch (cause) {
+      setModelsError(cause instanceof Error ? cause.message : String(cause)); return;
+    } finally { preparing.current = false; }
+    if (sendInputRef.current !== inputKey) return;
+    setSanitizedPreview(undefined);
 
     if (!credStatus?.has_key) {
       setIsKeyModalOpen(true);
@@ -676,7 +738,7 @@ export default function AiAssistantPanel({
     }
 
     let attachedContext = '';
-    try { attachedContext = formatAttachments(attachments); }
+    try { attachedContext = formatAttachments(attachments, contextBudget); }
     catch (cause) { setModelsError(cause instanceof Error ? cause.message : 'Attached context could not be verified safely.'); return; }
 
     const reqId = `req_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
@@ -708,18 +770,16 @@ export default function AiAssistantPanel({
 
     // Revalidate local history. Failed, interrupted, or sensitive messages stay visible
     // locally but cannot poison a later provider request.
-    const contextLimit = 12;
-    const historySlice = mode === 'web' ? [] : messages.slice(-contextLimit).filter(m => {
-      if (m.role === 'assistant' && m.status !== 'complete') return false;
-      try { return safeAiContext(m.content, 48_000) === m.content; } catch { return false; }
-    });
-    if (mode !== 'web' && historySlice.length < Math.min(messages.length, contextLimit)) setActivity('Unsafe or failed history omitted from this request.');
+    if (mode !== 'web' && historySlice.length < messages.length) setActivity('Sensitive or failed history omitted from this request.');
     const outgoingMessages = [
       ...historySlice.map(m => ({ role: m.role, content: m.content })),
       { role: 'user' as const, content: `${trimmed}${attachedContext}` },
     ];
 
     try {
+      if (outgoingMessages.length > 20) throw 'Conversation exceeds 20 outgoing messages. Explicitly start a new conversation.';
+      if (outgoingMessages.reduce((size, message) => size + contextByteSize(message.content), 0) > AI_REQUEST_LIMIT) throw 'Outgoing message text exceeds 1 MiB. Remove context or explicitly start a new conversation.';
+      if (selectedModel?.context_length && responseTokens >= selectedModel.context_length) throw 'Lower the response limit: it exceeds this model context capacity.';
       // Subscribe to streaming chunks
       if (unlistenRef.current) {
         unlistenRef.current();
@@ -790,6 +850,7 @@ export default function AiAssistantPanel({
 
       // Start the streaming completion in Rust
       await aiApi.startChat({
+        context_budget: contextBudget,
         request_id: reqId,
         provider,
         model: effectiveModel,
@@ -821,23 +882,35 @@ export default function AiAssistantPanel({
     }
   };
 
+  const dismissDisclosure = (event: React.KeyboardEvent<HTMLDetailsElement>) => {
+    if (event.key !== 'Escape') return;
+    event.preventDefault();
+    event.stopPropagation();
+    event.currentTarget.open = false;
+    event.currentTarget.querySelector('summary')?.focus();
+  };
+  const blurDisclosure = (event: React.FocusEvent<HTMLDetailsElement>) => {
+    if (!event.currentTarget.contains(event.relatedTarget as Node | null)) event.currentTarget.open = false;
+  };
+  const exclusiveDisclosure = (event: React.SyntheticEvent<HTMLDetailsElement>) => {
+    const current = event.currentTarget;
+    if (!current.open) return;
+    current.closest('.qe-ai-panel')?.querySelectorAll<HTMLDetailsElement>('.qe-ai-header-popover, .qe-ai-attach-menu, .qe-ai-budget-info').forEach(other => {
+      if (other !== current) other.open = false;
+    });
+  };
+
   const providerLabel = provider === 'openrouter' ? 'OpenRouter' : 'NVIDIA NIM';
   const providerKeyUrl =
     provider === 'openrouter' ? 'https://openrouter.ai/keys' : 'https://build.nvidia.com/';
 
   return (
-    <aside className="qe-ai-panel" aria-label="AI Assistant">
+    <aside className="qe-ai-panel" aria-label="AI Assistant" onPointerDownCapture={event => {
+      event.currentTarget.querySelectorAll<HTMLDetailsElement>('.qe-ai-header-popover[open], .qe-ai-attach-menu[open], .qe-ai-budget-info[open]').forEach(disclosure => {
+        if (!disclosure.contains(event.target as Node)) disclosure.open = false;
+      });
+    }}>
       {historyError && <p role="alert">History not saved: {historyError}</p>}
-      <details data-history-version={historyVersion}><summary>Chat history</summary>
-        <button disabled={isStreaming || historyBusy || !historyReady} onClick={() => { if (!window.confirm('Permanently clear all saved conversations for this project? Export anything you need first.')) return; pendingHistory.current = undefined; savingHistory.current = savingHistory.current.then(async () => { try { const next = { ...historyRef.current, chats: [] }; next.revision = await saveHistory(projectId, editorLease!, next); historyRef.current = next; handleClearChat(false); setHistoryVersion(v => v + 1); } catch (e) { setHistoryError(String(e)); } }); }}>Clear All History</button>
-        <input aria-label="Search chat history" placeholder="Search conversations" value={historySearch} onChange={e => setHistorySearch(e.target.value)} />
-        {historyRef.current.chats.filter(c => `${c.title} ${c.messages.map(m => m.content).join(' ')}`.toLowerCase().includes(historySearch.toLowerCase())).map(chat => <div key={chat.id}>
-          <button disabled={isStreaming || historyBusy} title={chat.messages[chat.messages.length - 1]?.content.slice(0, 160)} onClick={() => { pendingHistory.current?.(); followLatest.current = true; chatId.current = chat.id; setMessages(chat.messages); onDraftChange(chat.draft); onProviderChange(chat.provider); if (chat.provider === 'nvidia-nim') setNimModel(chat.model); else onModelChange(chat.model); onAttachmentsChange([]); }}>{chat.title} · {new Date(chat.updated).toLocaleString()} · {chat.provider}/{chat.model}</button>
-          <button onClick={() => { if (window.confirm('Exported chats may contain sensitive code or logs. Continue?')) void invoke('chat_history_export', { projectId, chatId: chat.id }).catch(e => setHistoryError(String(e))); }}>Export Markdown</button>
-          <button disabled={isStreaming || historyBusy} onClick={() => { const title = window.prompt('Conversation title', chat.title)?.trim(); if (!title) return; pendingHistory.current?.(); savingHistory.current = savingHistory.current.then(async () => { const next = { ...historyRef.current, chats: historyRef.current.chats.map(c => c.id === chat.id ? { ...c, title: redactForSharing(title.slice(0, 200)) } : c) }; try { next.revision = historyRef.current.revision; next.revision = await saveHistory(projectId, editorLease!, next); historyRef.current = next; setHistoryVersion(v => v + 1); } catch (e) { setHistoryError(String(e)); } }); }}>Rename</button>
-          <button disabled={isStreaming || historyBusy} onClick={() => { if (!window.confirm('Delete this saved conversation?')) return; savingHistory.current = savingHistory.current.then(async () => { pendingHistory.current = undefined; const next = { ...historyRef.current, chats: historyRef.current.chats.filter(c => c.id !== chat.id) }; try { next.revision = await saveHistory(projectId, editorLease!, next); historyRef.current = next; if (chatId.current === chat.id) handleClearChat(false); setHistoryVersion(v => v + 1); } catch (e) { setHistoryError(String(e)); } }); }}>Delete Chat</button>
-        </div>)}
-      </details>
       <header className="qe-ai-header">
         <div className="qe-ai-header-top">
           <div className="qe-ai-title">
@@ -845,6 +918,17 @@ export default function AiAssistantPanel({
             <h2>AI Assistant</h2>
           </div>
           <div className="qe-ai-header-actions">
+            <details className="qe-ai-header-popover qe-ai-history" data-history-version={historyVersion} onKeyDown={dismissDisclosure} onBlur={blurDisclosure} onToggle={exclusiveDisclosure}><summary title="Chat history" aria-label="Chat history"><HistoryIcon size={15} /></summary><div className="qe-ai-popover-content" aria-label="Saved conversations"><strong>Chat history</strong>
+        <button disabled={isStreaming || historyBusy || !historyReady} onClick={() => { if (!window.confirm('Permanently clear all saved conversations for this project? Export anything you need first.')) return; pendingHistory.current = undefined; savingHistory.current = savingHistory.current.then(async () => { try { const next = { ...historyRef.current, chats: [] }; next.revision = await saveHistory(projectId, editorLease!, next); historyRef.current = next; handleClearChat(false); setHistoryVersion(v => v + 1); } catch (e) { setHistoryError(String(e)); } }); }}>Clear All History</button>
+        <input aria-label="Search chat history" placeholder="Search conversations" value={historySearch} onChange={e => setHistorySearch(e.target.value)} />
+        {!historyRef.current.chats.length && <p>No saved conversations yet.</p>}
+        {historyRef.current.chats.filter(c => `${c.title} ${c.messages.map(m => m.content).join(' ')}`.toLowerCase().includes(historySearch.toLowerCase())).map(chat => <div key={chat.id}>
+          <button disabled={isStreaming || historyBusy} title={chat.messages[chat.messages.length - 1]?.content.slice(0, 160)} onClick={event => { const disclosure = event.currentTarget.closest('details'); if (disclosure) { disclosure.open = false; disclosure.querySelector('summary')?.focus(); } pendingHistory.current?.(); followLatest.current = true; chatId.current = chat.id; setMessages(chat.messages); onDraftChange(chat.draft); onProviderChange(chat.provider); if (chat.provider === 'nvidia-nim') setNimModel(chat.model); else onModelChange(chat.model); onAttachmentsChange([]); }}>{chat.title} · {new Date(chat.updated).toLocaleString()} · {chat.provider}/{chat.model}</button>
+          <button onClick={() => { if (window.confirm('Exported chats may contain sensitive code or logs. Continue?')) void invoke('chat_history_export', { projectId, chatId: chat.id }).catch(e => setHistoryError(String(e))); }}>Export Markdown</button>
+          <button disabled={isStreaming || historyBusy} onClick={() => { const title = window.prompt('Conversation title', chat.title)?.trim(); if (!title) return; pendingHistory.current?.(); savingHistory.current = savingHistory.current.then(async () => { const next = { ...historyRef.current, chats: historyRef.current.chats.map(c => c.id === chat.id ? { ...c, title: redactForSharing(title.slice(0, 200)) } : c) }; try { next.revision = historyRef.current.revision; next.revision = await saveHistory(projectId, editorLease!, next); historyRef.current = next; setHistoryVersion(v => v + 1); } catch (e) { setHistoryError(String(e)); } }); }}>Rename</button>
+          <button disabled={isStreaming || historyBusy} onClick={() => { if (!window.confirm('Delete this saved conversation?')) return; savingHistory.current = savingHistory.current.then(async () => { pendingHistory.current = undefined; const next = { ...historyRef.current, chats: historyRef.current.chats.filter(c => c.id !== chat.id) }; try { next.revision = await saveHistory(projectId, editorLease!, next); historyRef.current = next; if (chatId.current === chat.id) handleClearChat(false); setHistoryVersion(v => v + 1); } catch (e) { setHistoryError(String(e)); } }); }}>Delete Chat</button>
+        </div>)}
+      </div></details>
             <button
               type="button"
               className="qe-ai-btn-quiet"
@@ -856,7 +940,14 @@ export default function AiAssistantPanel({
               <Plus size={13} />
               <span>New Chat</span>
             </button>
-            <button type="button" className="qe-ai-btn-quiet" disabled={isStreaming || historyBusy || !historyReady || editorLease === undefined || (!messages.length && !draft && !attachments.length)} title={isStreaming ? 'Stop generation before clearing this conversation' : 'Clear only this conversation; keep its history entry and other chats'} onClick={handleClearCurrentChat}>Clear Chat</button>
+            <details className="qe-ai-header-popover qe-ai-more" onKeyDown={dismissDisclosure} onBlur={blurDisclosure} onToggle={exclusiveDisclosure}>
+              <summary title="More actions" aria-label="More assistant actions"><MoreHorizontal size={16} /></summary>
+              <div className="qe-ai-popover-content"><HelpLink section="ai-assistant" />
+                <p>Read-only assistant · Review suggestions before applying changes.</p>
+                <div className="qe-ai-destructive-actions">            <button type="button" className="qe-ai-btn-quiet" disabled={isStreaming || historyBusy || !historyReady || editorLease === undefined || (!messages.length && !draft && !attachments.length)} title={isStreaming ? 'Stop generation before clearing this conversation' : 'Clear only this conversation; keep its history entry and other chats'} onClick={event => { handleClearCurrentChat(); const disclosure = event.currentTarget.closest('details'); if (disclosure) { disclosure.open = false; disclosure.querySelector('summary')?.focus(); } }}>Clear Chat</button>
+</div>
+              </div>
+            </details>
             <button
               type="button"
               className="qe-ai-btn-quiet"
@@ -869,17 +960,23 @@ export default function AiAssistantPanel({
           </div>
         </div>
 
-        <section className={`qe-ai-configuration ${configExpanded ? 'is-expanded' : ''}`} aria-label="AI Configuration">
+      </header>
+        <section className={`qe-ai-configuration ${configExpanded ? 'is-expanded' : ''}`} aria-label="AI Configuration" onKeyDown={event => {
+          if (event.key === 'Escape' && configExpanded) {
+            event.preventDefault(); event.stopPropagation(); setConfigExpanded(false);
+            event.currentTarget.querySelector<HTMLButtonElement>('.qe-ai-configuration-summary')?.focus();
+            try { localStorage.setItem('devflow-ai-config-expanded', 'false'); } catch { /* Optional preference. */ }
+          }
+        }}>
           <button type="button" className="qe-ai-configuration-summary" aria-expanded={configExpanded} aria-controls="qe-ai-configuration-controls" onClick={() => { const next = !configExpanded; setConfigExpanded(next); try { localStorage.setItem('devflow-ai-config-expanded', String(next)); } catch { /* Session preference remains usable. */ } }} onKeyDown={event => { if (event.key === 'Escape' && configExpanded) { event.preventDefault(); setConfigExpanded(false); try { localStorage.setItem('devflow-ai-config-expanded', 'false'); } catch { /* Optional preference. */ } } }}>
-            <span className={`qe-ai-status-dot ${isTesting ? 'is-testing' : credStatus?.has_key ? 'is-connected' : 'is-disconnected'}`} aria-hidden="true" />
-            <span className="qe-ai-configuration-label">AI Configuration</span>
-            <span className="qe-ai-configuration-selection" title={`${providerLabel} · ${effectiveModel || 'No model selected'}`}>{providerLabel} · {selectedModel?.name || effectiveModel || 'No model selected'}</span>
+            <span className={`qe-ai-status-dot ${isTesting ? 'is-testing' : credStatus?.has_key && selectedCheck?.status === 'working' ? 'is-connected' : 'is-disconnected'}`} aria-hidden="true" />
+            <span className="qe-ai-sr-only">Configure provider and model</span>
+            <span className="qe-ai-sr-only">{isTesting ? 'Checking account. ' : !credStatus?.has_key ? 'API key required. ' : selectedCheck?.status === 'working' ? 'Model passed its last explicit check. ' : 'Model access not verified. '}</span><span className="qe-ai-configuration-selection" title={`${providerLabel} · ${effectiveModel || 'No model selected'}`}>{providerLabel} · {selectedModel?.name || effectiveModel.split('/').pop() || 'No model selected'}</span>
             {(!effectiveModel || !selectedModel || !credStatus?.has_key) && <AlertCircle size={14} className="qe-ai-configuration-warning" aria-label={!credStatus?.has_key ? 'Provider unavailable: API key not configured' : 'No available model selected'} />}
             <ChevronDown size={14} className="qe-ai-configuration-chevron" aria-hidden="true" />
           </button>
           <div id="qe-ai-configuration-controls" className="qe-ai-configuration-controls" hidden={!configExpanded}>
         <div className="qe-ai-capability-row"><span className="qe-ai-readonly-badge"><Shield size={11} aria-hidden="true" />Read-only</span></div>
-        {researchError && <p role="alert" className="qe-ai-research-status">{researchError}</p>}
         <div className="qe-ai-controls-grid">
           {/* Provider selector */}
           <div className="qe-ai-control-field">
@@ -988,7 +1085,7 @@ export default function AiAssistantPanel({
             </button>
           </div>
         </div>
-        <details className="qe-ai-settings"><summary>Settings</summary>
+        <details className="qe-ai-settings"><summary>Advanced settings</summary>
         {provider === 'nvidia-nim' && !nimModel && <p>Preferred: NVIDIA Nemotron 3.5 Bolt E4B. API identity and chat access are unverified. Select a catalog model explicitly; no substitute is selected.</p>}<div className="qe-ai-provider-options">
           {provider === 'openrouter' && <label><input type="checkbox" checked={freeOnly} onChange={event => setFreeOnly(event.target.checked)} />Free models only</label>}
           <label>Response limit <select value={responseTokens} disabled={isStreaming || historyBusy} onChange={event => setResponseTokens(Number(event.target.value))} aria-label="Maximum response tokens">{[256,512,1024,2048,4096].map(tokens => <option key={tokens} value={tokens}>{tokens} tokens</option>)}</select></label>
@@ -1026,8 +1123,8 @@ export default function AiAssistantPanel({
         </details>
           </div>
         </section>
-      </header>
-      <div role="status" aria-live="polite" className="qe-ai-research-status">{activity || (isStreaming ? 'Generating…' : mode === 'research' ? researchToken ? 'Research ready' : 'Research unavailable' : '')}</div>
+      {researchError && <p role="alert" className="qe-ai-research-status">{researchError}</p>}
+      {activity && <div role="status" aria-live="polite" className="qe-ai-research-status">{activity}</div>}
 
       {/* API Key Modal / Dialog */}
       {isKeyModalOpen && (
@@ -1171,14 +1268,13 @@ export default function AiAssistantPanel({
         {messages.length === 0 ? (
           <div className="qe-ai-empty">
             <div className="qe-ai-empty-icon" aria-hidden="true">
-              <Sparkles size={22} />
+              <Sparkles size={18} />
             </div>
-            <h3 className="qe-ai-empty-title">DevFlow AI Assistant</h3>
+            <h3 className="qe-ai-empty-title">What are you working on?</h3>
             <p className="qe-ai-empty-desc">
-              Context-aware pair programming and debugging assistance powered by {providerLabel}.
+              Understand code, work through errors, or review a selection.
             </p>
             <div className="qe-ai-suggestions" role="group" aria-label="Starter suggestions">
-              <span className="qe-ai-suggestions-header">Quick prompts</span>
               {AI_SUGGESTIONS.map(s => {
                 const Icon = s.icon;
                 return (
@@ -1186,7 +1282,9 @@ export default function AiAssistantPanel({
                     key={s.kind}
                     type="button"
                     className="qe-ai-suggestion-chip"
-                    onClick={() => handleSuggestion(s.prompt)}
+                    disabled={historyBusy || isStreaming || (s.kind === 'Review selected code' && !canAttachSelectedCode)}
+                    title={s.kind === 'Review selected code' && !canAttachSelectedCode ? 'Select code in the editor first' : 'Fill the message prompt; review and send when ready'}
+                    onClick={() => { if (s.kind === 'Review selected code') onAttachSelectedCode(); handleSuggestion(s.prompt); }}
                   >
                     <Icon size={13} className="qe-ai-chip-icon" />
                     <span>{s.label}</span>
@@ -1212,16 +1310,52 @@ export default function AiAssistantPanel({
       </section>
       {/* Composer */}
       <footer className="qe-ai-composer">
-        <div
+        {attachments.length > 0 && <div
           className="qe-ai-attachments"
           role="group"
           aria-label="User controlled context attachments"
         >
           {attachments.length > 0 && <div className="qe-ai-context-summary">
             <span className="qe-ai-attachments-label">{attachments.length ? `${attachments.length} attachments` : 'Context'}</span>
-            <span className="qe-ai-phase-tag">{attachments.length ? `${attachments.reduce((size, item) => size + contextByteSize(item.content), 0).toLocaleString()} bytes` : 'Added only when selected'}</span>
+            <span className="qe-ai-phase-tag">{attachments.length ? `${(attachments.reduce((size, item) => size + contextByteSize(item.content), 0) / 1024).toFixed(1)} / ${contextBudget / 1024} KiB` : `0 / ${contextBudget / 1024} KiB · 0 attachments`}</span>
           </div>}
-          <details className="qe-ai-attach-menu" ref={attachMenuRef} onKeyDown={event => { if (event.key === 'Escape') { event.currentTarget.open = false; event.currentTarget.querySelector('summary')?.focus(); } }} onBlur={event => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) event.currentTarget.open = false; }}><summary>Attach <ChevronDown size={12} aria-hidden="true" /></summary><div className="qe-ai-attach-options"><div className="qe-ai-attachments-row" onClick={event => { if ((event.target as Element).closest('button:not(:disabled)') && attachMenuRef.current) { attachMenuRef.current.open = false; attachMenuRef.current.querySelector('summary')?.focus(); } }}>
+          {attachments.length > 0 && <button type="button" disabled={historyBusy} onClick={() => onAttachmentsChange([])}>Clear attachments</button>}
+          {attachments.reduce((size, item) => size + contextByteSize(item.content), 0) >= contextBudget * 0.8 && <p role="status">Context budget nearly full or exceeded. Select a smaller range or change the budget.</p>}
+          {attachments.length > 0 && <div className="qe-ai-attachment-list">
+            {attachments.map(attachment => <div className="qe-ai-selected-attachment" key={attachment.id}>
+              <details className="qe-ai-attachment-preview">
+                <summary title={attachment.label}><span>{attachment.sanitization ? "Review sanitized content · " : ""}{attachment.label}</span><span>{contextByteSize(attachment.content).toLocaleString()} bytes</span></summary>
+                {attachment.unsaved && <p className="qe-ai-unsaved-note">Unsaved editor draft included. This snapshot will not save the file.</p>}
+                <p>{attachment.sanitization || "Review exact context before sending."}</p>
+                <pre tabIndex={0} aria-label={`Exact attachment preview: ${attachment.label}`}>{attachment.content}</pre>
+              </details>
+              <button type="button" disabled={historyBusy} aria-label={`Remove ${attachment.label}`} title="Remove attachment" onClick={() => onAttachmentsChange(attachments.filter(item => item.id !== attachment.id))}>×</button>
+            </div>)}
+            <label className="qe-ai-review-context"><input type="checkbox" checked={reviewedAttachmentKey === attachmentKey && !!attachmentKey} onChange={event => setReviewedAttachmentKey(event.target.checked ? attachmentKey : '')} />I reviewed this exact context and approve sending it with my next message.</label>
+          </div>}
+        </div>}
+
+        {sanitizedPreview && sanitizedPreview.key === sendInputKey && <SanitizedMessageReview content={sanitizedPreview.content} lines={sanitizedPreview.lines} error={modelsError} onSend={() => void handleSend(sanitizedPreview)} onCancel={() => setSanitizedPreview(undefined)} />}
+
+        {/* Text input */}
+        <div className="qe-ai-input-wrap">
+          <textarea
+            ref={textareaRef}
+            className="qe-ai-textarea"
+            placeholder={mode === 'web' ? 'Ask a general question…' : mode === 'research' ? 'Ask about this project…' : 'Ask anything or attach context…'}
+            value={draft}
+            disabled={isStreaming || historyBusy || !historyReady}
+            onChange={e => { onDraftChange(e.target.value); setSanitizedPreview(undefined); }}
+            onKeyDown={handleKeyDown}
+            rows={2}
+            title="Enter to send · Shift+Enter for newline"
+            aria-label="Message prompt"
+          />
+        </div>
+
+        {/* Composer footer */}
+        <div className="qe-ai-composer-footer">
+          <details className="qe-ai-attach-menu" onToggle={exclusiveDisclosure} ref={attachMenuRef} onKeyDown={event => { if (event.key === 'Escape') { event.currentTarget.open = false; event.currentTarget.querySelector('summary')?.focus(); } }} onBlur={event => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) event.currentTarget.open = false; }}><summary title="Attach context"><Paperclip size={14} aria-hidden="true" />Attach <ChevronDown size={12} aria-hidden="true" /></summary><div className="qe-ai-attach-options"><div className="qe-ai-attachments-row" onClick={event => { if ((event.target as Element).closest('button:not(:disabled)') && attachMenuRef.current) { attachMenuRef.current.open = false; attachMenuRef.current.querySelector('summary')?.focus(); } }}>
             <button type="button" className="qe-ai-attachment-chip" disabled={historyBusy || !canAttachCurrentFile} title={canAttachCurrentFile ? 'Attach a reviewed snapshot of the current file' : 'Open a file in Quick Editor first'} onClick={onAttachCurrentFile}>
               <FileText size={12} />
               <span>Current File</span>
@@ -1239,48 +1373,11 @@ export default function AiAssistantPanel({
           <AiFilePicker key={`${projectId}:${projectRoot}`} projectId={projectId} projectRoot={projectRoot} attachments={attachments} onChange={items => { onAttachmentsChange(items); if (attachMenuRef.current) { attachMenuRef.current.open = false; attachMenuRef.current.querySelector('summary')?.focus(); } }} />
           </div></details>
           <label className="qe-ai-mode-control"><span className="qe-ai-sr-only">Assistant mode</span><select aria-label="Assistant mode" value={mode} disabled={isStreaming || historyBusy} onChange={event => { setMode(event.target.value as AssistantMode); setActivity(''); }}><option value="chat">Chat</option><option value="research">Research</option><option value="web">Web</option></select></label>
-          {attachments.length > 0 && <button type="button" disabled={historyBusy} onClick={() => onAttachmentsChange([])}>Clear attachments</button>}
-          {attachments.reduce((size, item) => size + contextByteSize(item.content), 0) > 6000 && <p>Large context may consume significant provider tokens.</p>}
-          {attachments.length > 0 && <div className="qe-ai-attachment-list">
-            {attachments.map(attachment => <div className="qe-ai-selected-attachment" key={attachment.id}>
-              <details className="qe-ai-attachment-preview">
-                <summary><span>{attachment.label}</span><span>{contextByteSize(attachment.content).toLocaleString()} bytes</span></summary>
-                {attachment.unsaved && <p className="qe-ai-unsaved-note">Unsaved editor draft included. This snapshot will not save the file.</p>}
-                <pre tabIndex={0} aria-label={`Exact attachment preview: ${attachment.label}`}>{attachment.content}</pre>
-              </details>
-              <button type="button" disabled={historyBusy} aria-label={`Remove ${attachment.label}`} title="Remove attachment" onClick={() => onAttachmentsChange(attachments.filter(item => item.id !== attachment.id))}>×</button>
-            </div>)}
-            <label className="qe-ai-review-context"><input type="checkbox" checked={reviewedAttachmentKey === attachmentKey && !!attachmentKey} onChange={event => setReviewedAttachmentKey(event.target.checked ? attachmentKey : '')} />I reviewed this exact context and approve sending it with my next message.</label>
-          </div>}
-        </div>
-
-        {sanitizedPreview && <div className="qe-ai-sanitize-preview" role="alert"><strong>Review sanitized message</strong><p>Private paths were replaced. The original has not been sent.</p><pre>{sanitizedPreview}</pre><button type="button" onClick={() => { onDraftChange(sanitizedPreview); setSanitizedPreview(''); }}>Use sanitized message</button><button type="button" onClick={() => setSanitizedPreview('')}>Keep editing</button></div>}
-
-        {/* Text input */}
-        <div className="qe-ai-input-wrap">
-          <textarea
-            ref={textareaRef}
-            className="qe-ai-textarea"
-            placeholder={mode === 'web' ? 'Ask a general question…' : mode === 'research' ? 'Ask about this project…' : 'Ask anything or attach context…'}
-            value={draft}
-            disabled={isStreaming || historyBusy || !historyReady}
-            onChange={e => { onDraftChange(e.target.value); setSanitizedPreview(''); }}
-            onKeyDown={handleKeyDown}
-            rows={3}
-            aria-label="Message prompt"
-          />
-        </div>
-
-        {/* Composer footer */}
-        <div className="qe-ai-composer-footer">
-          <span className="qe-ai-footer-note">
-            {isStreaming
-              ? 'Generating response…'
-              : !credStatus?.has_key
-              ? 'Configure API key to chat'
-              : 'Enter to send · Shift+Enter for newline'}
-          </span>
-
+          <details className="qe-ai-budget-info" onKeyDown={dismissDisclosure} onBlur={blurDisclosure} onToggle={exclusiveDisclosure}>
+            <summary title="Context budget" aria-label={`Context budget: ${contextBudget / 1024} KiB`}>{contextBudget / 1024} KiB<ChevronDown size={11} aria-hidden="true" /></summary>
+            <div className="qe-ai-popover-content">{budgetControl}<p>Bytes are not tokens. Capacity includes history and response. {selectedModel?.context_length ? `Model catalog: ${selectedModel.context_length.toLocaleString()} tokens.` : 'Model capacity unknown.'}</p><p>Research reads project files with permission. Web uses model knowledge, without live browsing.</p></div>
+          </details>
+          <span className="qe-ai-toolbar-spacer" />
           {isStreaming ? (
             <button
               type="button"

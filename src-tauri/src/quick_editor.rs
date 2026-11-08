@@ -6,6 +6,8 @@ pub(crate) mod actions;
 pub(crate) mod snapshots;
 pub(crate) mod research;
 pub(crate) mod paste_new;
+pub(crate) mod watch;
+pub(crate) mod search;
 
 const MAX_BYTES: u64 = 2 * 1024 * 1024;
 #[derive(Default)]

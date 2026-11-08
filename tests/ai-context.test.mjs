@@ -85,7 +85,7 @@ test('file snapshots deduplicate across picker/editor labels while selections re
 });
 
 test('attachment total limit is enforced and context previews are sent only when requested', () => {
-  assert.throws(() => context.formatAttachments([{ id: 'x', projectId: 'p1', kind: 'file', label: 'large.ts', content: 'x'.repeat(context.AI_ATTACHMENT_LIMIT + 1) }]), /12,000 bytes/);
+  assert.throws(() => context.formatAttachments([{ id: 'x', projectId: 'p1', kind: 'file', label: 'large.ts', content: 'x'.repeat(context.AI_ATTACHMENT_LIMIT + 1) }]), /65,536 UTF-8 bytes/);
   assert.equal(context.formatAttachments([]), '');
   const value = context.fileAttachment('p1', 'Demo', 'x.ts', 'typescript', 'source', false);
   assert.match(context.formatAttachments([{ ...value, id: 'x' }]), /source/);
@@ -98,4 +98,36 @@ test('diagnostic path proposal preserves traceback filename, line, and structure
   assert.match(proposed, /ValueError: bad value/);
   assert.doesNotMatch(proposed, /C:\\Projects/);
   assert.equal(context.sanitizeDiagnosticPaths(proposed), proposed);
+});
+
+
+test('UTF-8 budgets preserve exact text and enforce combined and individual caps', () => {
+  const item = (id, content) => ({ id, projectId: 'p', kind: 'file', label: `${id}.ts`, content });
+  const text = '界'.repeat(10000);
+  assert.equal(context.contextByteSize(text), 30000);
+  assert.equal(context.approximateContextSize([item('a', text)]), 30000);
+  assert.match(context.formatAttachments([item('a', text)], 65536), new RegExp(text));
+  assert.throws(() => context.formatAttachments([item('a', text)], 16384), /16,384/);
+  assert.throws(() => context.formatAttachments([item('a', text), item('b', text), item('c', text)], 65536), /65,536/);
+  assert.doesNotThrow(() => context.formatAttachments([item('a', 'x'.repeat(250000)), item('b', 'y'.repeat(250000))], 524288));
+  assert.throws(() => context.formatAttachments([item('large', 'x'.repeat(262145))], 524288), /large.ts/);
+  assert.throws(() => context.formatAttachments([], 12345), /Invalid/);
+});
+
+test('security approval binds exact content and previously rejected turns cannot poison history', () => {
+  const approval = { key: 'project:draft:attachments', source: 'original', content: 'sanitized' };
+  assert.equal(context.sanitizationApproved(approval, approval.key, 'original', 'sanitized'), true);
+  for (const [key, source, content] of [['edited', 'original', 'sanitized'], [approval.key, 'edited', 'sanitized'], [approval.key, 'original', 'edited']]) {
+    assert.equal(context.sanitizationApproved(approval, key, source, content), false);
+  }
+  const messages = [{ role: 'user', content: 'rejected' }, { role: 'assistant', status: 'error' }, { role: 'user', content: 'safe' }, { role: 'assistant', status: 'complete' }];
+  assert.deepEqual(context.eligibleAiHistory(messages), messages.slice(2));
+  assert.deepEqual(context.eligibleAiHistory([{ role: 'user' }, { role: 'assistant', status: 'cancelled' }]), []);
+});
+
+test('security native-prepared documentation preserves harmless references and placeholders', () => {
+  for (const text of ['Authorization: Bearer YOUR_TOKEN', 'const api_key = process.env.API_KEY;', 'const api_key = "${API_KEY}";', '{"Authorization":"Bearer <token>"}']) {
+    assert.equal(context.safeAiContext(text, 65536, true), text);
+    assert.match(context.formatAttachments([{ id: 'a', projectId: 'p', label: 'auth.md', kind: 'file', content: text }]), /USER-PROVIDED CONTEXT/);
+  }
 });
